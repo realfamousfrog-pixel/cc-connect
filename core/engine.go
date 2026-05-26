@@ -209,10 +209,13 @@ type Engine struct {
 	bannedWords []string
 	bannedMu    sync.RWMutex
 
-	disabledCmds map[string]bool
-	adminFrom    string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
-	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
-	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
+	disabledCmds   map[string]bool
+	adminFrom      string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
+	userRoles      *UserRoleManager // nil = legacy mode (no per-user policies)
+	userRolesMu    sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
+	highRiskAuth   HighRiskAuthConfig
+	highRiskStates map[string]*highRiskUserState
+	highRiskMu     sync.Mutex
 
 	rateLimiter       *RateLimiter
 	outgoingRL        *OutgoingRateLimiter
@@ -317,6 +320,10 @@ type interactiveState struct {
 	approveAll             bool            // when true, auto-approve all permission requests for this session
 	fromVoice              bool            // true if current turn originated from voice transcription
 	sideText               string
+	pendingImages          []ImageAttachment
+	pendingFiles           []FileAttachment
+	pendingImagePaths      []string
+	pendingFilePaths       []string
 	deleteMode             *deleteModeState
 	modelSwitch            *modelSwitchState
 	pendingProviderAdd     *pendingProviderAddState
@@ -432,6 +439,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
+		highRiskStates:        make(map[string]*highRiskUserState),
 	}
 
 	if ag != nil {
@@ -628,7 +636,6 @@ func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webSt
 func (e *Engine) SetSkipGit(skipGit bool) {
 	e.skipGit = skipGit
 }
-
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
@@ -1974,6 +1981,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		msg.Content = content
 	}
 
+	if e.handleHighRiskPasswordReply(p, msg, content) {
+		return
+	}
+
 	// Rate limit check (per-user role-based, then global fallback)
 	if !e.checkRateLimit(msg) {
 		slog.Info("message rate limited",
@@ -2048,6 +2059,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
+	if !strings.HasPrefix(content, "/") && !strings.HasPrefix(content, "!") {
+		if e.handleHighRiskNaturalLanguage(p, msg, content, agent) {
+			return
+		}
+	}
+
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
@@ -2066,6 +2083,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "!") {
 		shellCmd := strings.TrimSpace(content[1:])
 		if shellCmd != "" {
+			if e.maybeBlockHighRiskCommand(p, msg, "/shell "+shellCmd) {
+				return
+			}
 			// Check disabled / admin just like handleCommand does for "shell"
 			e.userRolesMu.RLock()
 			disabledCmds := e.disabledCmds
@@ -2663,6 +2683,63 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
+	var stagedImages []ImageAttachment
+	var stagedFiles []FileAttachment
+	attachmentWorkDir := workspaceDir
+	if attachmentWorkDir == "" {
+		if wd, ok := state.agentSession.(interface{ GetWorkDir() string }); ok {
+			attachmentWorkDir = wd.GetWorkDir()
+		}
+	}
+	if attachmentWorkDir == "" {
+		if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+			attachmentWorkDir = wd.GetWorkDir()
+		}
+	}
+	if attachmentWorkDir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			attachmentWorkDir = wd
+		}
+	}
+	state.mu.Lock()
+	if len(msg.Images) > 0 {
+		imagePaths := SaveImagesToDisk(attachmentWorkDir, msg.Images)
+		for i, path := range imagePaths {
+			stagedImages = append(stagedImages, ImageAttachment{
+				MimeType: msg.Images[i].MimeType,
+				FileName: path,
+			})
+			state.pendingImagePaths = append(state.pendingImagePaths, path)
+		}
+		state.pendingImages = append(state.pendingImages, stagedImages...)
+	}
+	if len(msg.Files) > 0 {
+		filePaths := SaveFilesToDisk(attachmentWorkDir, msg.Files)
+		for i, path := range filePaths {
+			stagedFiles = append(stagedFiles, FileAttachment{
+				MimeType: msg.Files[i].MimeType,
+				FileName: path,
+			})
+			state.pendingFilePaths = append(state.pendingFilePaths, path)
+		}
+		state.pendingFiles = append(state.pendingFiles, stagedFiles...)
+	}
+	pendingImages := append([]ImageAttachment(nil), state.pendingImages...)
+	pendingFiles := append([]FileAttachment(nil), state.pendingFiles...)
+	pureAttachment := strings.TrimSpace(msg.Content) == "" && (len(pendingImages) > 0 || len(pendingFiles) > 0)
+	if !pureAttachment && strings.TrimSpace(msg.Content) != "" {
+		state.pendingImages = nil
+		state.pendingFiles = nil
+		state.pendingImagePaths = nil
+		state.pendingFilePaths = nil
+	}
+	state.mu.Unlock()
+
+	if pureAttachment {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAttachmentStored))
+		return
+	}
+
 	sendStart := time.Now()
 	state.mu.Lock()
 	state.currentMessageID = msg.MessageID
@@ -2675,7 +2752,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
+		sendDone <- state.agentSession.Send(promptContent, pendingImages, pendingFiles)
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
@@ -4801,6 +4878,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			"user_id", msg.UserID, "platform", msg.Platform,
 			"project", e.name, "command", cmdID, "reason", "disabled")
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+cmdID))
+		return true
+	}
+
+	if e.maybeBlockHighRiskCommand(p, msg, raw) {
 		return true
 	}
 

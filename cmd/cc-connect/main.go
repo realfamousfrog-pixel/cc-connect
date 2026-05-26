@@ -114,6 +114,9 @@ func main() {
 		case "web":
 			runWeb(os.Args[2:])
 			return
+		case "secret":
+			runSecret(os.Args[2:])
+			return
 		}
 	}
 
@@ -393,6 +396,15 @@ func main() {
 
 		// Wire admin allowlist for privileged commands
 		engine.SetAdminFrom(proj.AdminFrom)
+		engine.SetHighRiskAuthConfig(core.HighRiskAuthConfig{
+			Enabled:          proj.HighRiskAuth.Enabled,
+			PasswordHash:     proj.HighRiskAuth.PasswordHash,
+			UnlockWindowSecs: proj.HighRiskAuth.UnlockWindowSecs,
+			PendingTTLSecs:   proj.HighRiskAuth.PendingTTLSecs,
+			MaxFailures:      proj.HighRiskAuth.MaxFailures,
+			ChallengePrompt:  proj.HighRiskAuth.ChallengePrompt,
+			Scope:            proj.HighRiskAuth.Scope,
+		})
 
 		// Wire per-user role-based policies
 		if proj.Users != nil {
@@ -1367,6 +1379,9 @@ Commands:
     remove           Remove a provider (--project, --name)
     import           Import providers from cc-switch
 
+  secret             Generate secret material for config values
+    hash-password    Generate an Argon2id hash for high_risk_auth.password_hash
+
   feishu             Setup Feishu/Lark bot credentials
     setup            Smart setup (QR create or bind when --app is provided)
     new              Force QR onboarding to create a new bot
@@ -1397,6 +1412,7 @@ Examples:
   cc-connect weixin setup             Setup Weixin (ilink) with QR or --token
   cc-connect update                   Update to the latest version
   cc-connect config format            Format the config file
+  cc-connect secret hash-password --value "secret"
   cc-connect config example > c.toml  Save example config to a file
 
 `, v, updateHint)
@@ -1535,6 +1551,15 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload admin allowlist
 	engine.SetAdminFrom(proj.AdminFrom)
+	engine.SetHighRiskAuthConfig(core.HighRiskAuthConfig{
+		Enabled:          proj.HighRiskAuth.Enabled,
+		PasswordHash:     proj.HighRiskAuth.PasswordHash,
+		UnlockWindowSecs: proj.HighRiskAuth.UnlockWindowSecs,
+		PendingTTLSecs:   proj.HighRiskAuth.PendingTTLSecs,
+		MaxFailures:      proj.HighRiskAuth.MaxFailures,
+		ChallengePrompt:  proj.HighRiskAuth.ChallengePrompt,
+		Scope:            proj.HighRiskAuth.Scope,
+	})
 
 	// Reload per-user role-based policies
 	if proj.Users != nil {

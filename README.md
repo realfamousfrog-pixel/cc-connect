@@ -524,6 +524,9 @@ Notes:
 - `attachment_send = "off"` disables only attachment send-back; ordinary text replies still work.
 - This command is for generated attachments, not ordinary text replies.
 
+Incoming attachments from chat apps are stored under `artifacts/incoming/images/` and `artifacts/incoming/files/` inside the workspace.
+If the user sends only an attachment without text, cc-connect stores it first and waits for the next text message before asking the agent to process it.
+
 📖 **Full documentation:** [docs/usage.md](docs/usage.md)
 
 

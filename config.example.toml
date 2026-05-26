@@ -674,6 +674,19 @@ name = "my-backend"
 # 仅在个人单用户部署中使用此配置，确保所有允许的用户均可信任。
 # admin_from = "*"
 
+# Optional: additional password gate for high-risk host operations over chat.
+# 可选：为聊天链路中的高风险宿主机操作增加额外密码门。
+# Generate password_hash with:
+#   cc-connect secret hash-password --value "your-password"
+# [projects.high_risk_auth]
+# enabled = true
+# password_hash = "$argon2id$..."
+# unlock_window_secs = 600
+# pending_ttl_secs = 180
+# max_failures = 3
+# challenge_prompt = "检测到高风险操作，请直接回复高风险密码完成授权。"
+# scope = "user"
+
 # Multi-user mode — per-user rate limits and role-based command ACL
 # 多用户模式 — 按用户速率限制和基于角色的命令权限控制
 #

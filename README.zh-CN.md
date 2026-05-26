@@ -513,6 +513,9 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 - `attachment_send = "off"` 只会关闭附件回传，普通文本回复仍然正常。
 - 这个命令是给“生成后的附件回传”用的，不是给普通文本回复用的。
 
+聊天应用发来的入站附件会存放在工作区内的 `artifacts/incoming/images/` 和 `artifacts/incoming/files/`。
+如果用户只发送附件而不附带文字，cc-connect 会先收件入箱，等待下一条文字消息再交给 agent 处理。
+
 📖 **完整文档：** [docs/usage.zh-CN.md](docs/usage.zh-CN.md)
 
 

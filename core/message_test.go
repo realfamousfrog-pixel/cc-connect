@@ -48,7 +48,7 @@ func TestSanitizeAttachmentFileName(t *testing.T) {
 // this test asserts every file lands inside attachDir, with no escapees.
 func TestSaveFilesToDisk_RejectsPathTraversal(t *testing.T) {
 	workDir := t.TempDir()
-	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+	attachDir := filepath.Join(workDir, "artifacts", "incoming", "files")
 
 	files := []FileAttachment{
 		// The original repro: walks two levels up out of attachments and
@@ -95,5 +95,27 @@ func TestSaveFilesToDisk_RejectsPathTraversal(t *testing.T) {
 	okPath := filepath.Join(attachDir, "ok.txt")
 	if _, err := os.Stat(okPath); err != nil {
 		t.Errorf("legitimate ok.txt not saved: %v", err)
+	}
+}
+
+func TestSaveImagesToDisk_WritesIntoIncomingArtifacts(t *testing.T) {
+	workDir := t.TempDir()
+	imageDir := filepath.Join(workDir, "artifacts", "incoming", "images")
+
+	paths := SaveImagesToDisk(workDir, []ImageAttachment{
+		{MimeType: "image/png", Data: []byte("png")},
+		{MimeType: "image/jpeg", Data: []byte("jpg")},
+	})
+
+	if len(paths) != 2 {
+		t.Fatalf("SaveImagesToDisk paths len = %d, want 2", len(paths))
+	}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, imageDir+string(filepath.Separator)) {
+			t.Fatalf("SaveImagesToDisk wrote outside image dir: %q", p)
+		}
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected staged image to exist: %v", err)
+		}
 	}
 }

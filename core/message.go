@@ -78,7 +78,49 @@ type FileAttachment struct {
 	FileName string // original filename
 }
 
-// SaveFilesToDisk saves file attachments to workDir/.cc-connect/attachments/
+func incomingAttachmentRoot(workDir string) string {
+	return filepath.Join(workDir, "artifacts", "incoming")
+}
+
+func incomingImageDir(workDir string) string {
+	return filepath.Join(incomingAttachmentRoot(workDir), "images")
+}
+
+func incomingFileDir(workDir string) string {
+	return filepath.Join(incomingAttachmentRoot(workDir), "files")
+}
+
+// SaveImagesToDisk saves image attachments to workDir/artifacts/incoming/images/
+// and returns the list of absolute image paths.
+func SaveImagesToDisk(workDir string, images []ImageAttachment) []string {
+	if len(images) == 0 {
+		return nil
+	}
+	imgDir := incomingImageDir(workDir)
+	if err := os.MkdirAll(imgDir, 0o755); err != nil {
+		slog.Warn("SaveImagesToDisk: mkdir failed", "dir", imgDir, "error", err)
+	}
+
+	var paths []string
+	for i, img := range images {
+		if existing := existingAttachmentPath(img.FileName, img.Data); existing != "" {
+			paths = append(paths, existing)
+			continue
+		}
+		ext := imageAttachmentExt(img.MimeType)
+		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
+		fpath := filepath.Join(imgDir, fname)
+		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+			slog.Error("SaveImagesToDisk: write failed", "error", err)
+			continue
+		}
+		paths = append(paths, fpath)
+		slog.Debug("SaveImagesToDisk: image saved", "path", fpath, "name", img.FileName, "mime", img.MimeType, "size", len(img.Data))
+	}
+	return paths
+}
+
+// SaveFilesToDisk saves file attachments to workDir/artifacts/incoming/files/
 // and returns the list of absolute file paths. Agents can reference these paths
 // in their prompts so the CLI can read them with built-in tools.
 //
@@ -91,13 +133,17 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 	if len(files) == 0 {
 		return nil
 	}
-	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+	attachDir := incomingFileDir(workDir)
 	if err := os.MkdirAll(attachDir, 0o755); err != nil {
 		slog.Warn("SaveFilesToDisk: mkdir failed", "dir", attachDir, "error", err)
 	}
 
 	var paths []string
 	for i, f := range files {
+		if existing := existingAttachmentPath(f.FileName, f.Data); existing != "" {
+			paths = append(paths, existing)
+			continue
+		}
 		fname := sanitizeAttachmentFileName(f.FileName)
 		if fname == "" {
 			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
@@ -111,6 +157,30 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 		slog.Debug("SaveFilesToDisk: file saved", "path", fpath, "name", f.FileName, "mime", f.MimeType, "size", len(f.Data))
 	}
 	return paths
+}
+
+func imageAttachmentExt(mime string) string {
+	switch mime {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
+}
+
+func existingAttachmentPath(name string, data []byte) string {
+	if len(data) != 0 || name == "" || !filepath.IsAbs(name) {
+		return ""
+	}
+	info, err := os.Stat(name)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	return name
 }
 
 // sanitizeAttachmentFileName reduces a user-supplied attachment filename to a

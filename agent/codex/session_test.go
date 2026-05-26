@@ -262,7 +262,7 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	if imagePath == "" {
 		t.Fatalf("args missing --image: %v", args)
 	}
-	if !strings.HasPrefix(imagePath, filepath.Join(workDir, ".cc-connect", "images")+string(filepath.Separator)) {
+	if !strings.HasPrefix(imagePath, filepath.Join(workDir, "artifacts", "incoming", "images")+string(filepath.Separator)) {
 		t.Fatalf("image path = %q, want under work dir image cache", imagePath)
 	}
 	data, err := os.ReadFile(imagePath)

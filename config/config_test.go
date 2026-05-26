@@ -2522,6 +2522,88 @@ func TestGetProjectConfigDetails(t *testing.T) {
 	}
 }
 
+func TestLoad_HighRiskAuthConfig(t *testing.T) {
+	configPath := writeConfigFixture(t, `
+language = "zh"
+
+[[projects]]
+name = "alpha"
+admin_from = "user1"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "abc"
+
+[projects.high_risk_auth]
+enabled = true
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$YWFhYWFhYWFhYWFhYWFhYQ$YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE"
+unlock_window_secs = 600
+pending_ttl_secs = 180
+max_failures = 3
+challenge_prompt = "检测到高风险操作，请直接回复高风险密码完成授权。"
+scope = "user"
+`)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	got := cfg.Projects[0].HighRiskAuth
+	if !got.Enabled || got.UnlockWindowSecs != 600 || got.PendingTTLSecs != 180 || got.MaxFailures != 3 || got.Scope != "user" {
+		t.Fatalf("high_risk_auth = %+v", got)
+	}
+}
+
+func TestGetProjectConfigDetails_HidesHighRiskHash(t *testing.T) {
+	configPath := writeConfigFixture(t, `
+language = "zh"
+
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "abc"
+
+[projects.high_risk_auth]
+enabled = true
+password_hash = "do-not-leak"
+unlock_window_secs = 600
+scope = "user"
+`)
+	patchConfigPath(t, configPath)
+
+	details := GetProjectConfigDetails("alpha")
+	if details == nil {
+		t.Fatal("GetProjectConfigDetails returned nil")
+	}
+	raw, ok := details["high_risk_auth"].(map[string]any)
+	if !ok {
+		t.Fatalf("high_risk_auth = %#v", details["high_risk_auth"])
+	}
+	if _, exists := raw["password_hash"]; exists {
+		t.Fatalf("password_hash leaked in project config details: %#v", raw)
+	}
+	if raw["enabled"] != true || raw["unlock_window_secs"] != 600 || raw["scope"] != "user" {
+		t.Fatalf("high_risk_auth details = %#v", raw)
+	}
+}
+
 func TestAddPlatformToProject_NewProjectWithAgentTypeAndWorkDir(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)

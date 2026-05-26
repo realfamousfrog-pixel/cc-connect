@@ -249,3 +249,11 @@ Unregister-ScheduledTask -TaskName %s -Confirm:$false
 	}
 	return nil
 }
+
+func CheckLinger() (enabled bool, user string) {
+	user = os.Getenv("USERNAME")
+	if user == "" {
+		user = "unknown"
+	}
+	return true, user
+}

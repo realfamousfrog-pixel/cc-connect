@@ -5819,6 +5819,12 @@ type controllableAgentSession struct {
 	report          *UsageReport
 	contextUsage    *ContextUsage
 	usageErr        error
+	sendMu          sync.Mutex
+	sendCalls       int
+	lastPrompt      string
+	lastImages      []ImageAttachment
+	lastFiles       []FileAttachment
+	sendFn          func(prompt string, images []ImageAttachment, files []FileAttachment) error
 }
 
 func newControllableSession(id string) *controllableAgentSession {
@@ -5830,7 +5836,17 @@ func newControllableSession(id string) *controllableAgentSession {
 	}
 }
 
-func (s *controllableAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *controllableAgentSession) Send(prompt string, images []ImageAttachment, files []FileAttachment) error {
+	s.sendMu.Lock()
+	s.sendCalls++
+	s.lastPrompt = prompt
+	s.lastImages = append([]ImageAttachment(nil), images...)
+	s.lastFiles = append([]FileAttachment(nil), files...)
+	sendFn := s.sendFn
+	s.sendMu.Unlock()
+	if sendFn != nil {
+		return sendFn(prompt, images, files)
+	}
 	return nil
 }
 func (s *controllableAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
@@ -5856,6 +5872,12 @@ func (s *controllableAgentSession) Close() error {
 		close(s.closed)
 	}
 	return nil
+}
+
+func (s *controllableAgentSession) SendSnapshot() (int, string, []ImageAttachment, []FileAttachment) {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	return s.sendCalls, s.lastPrompt, append([]ImageAttachment(nil), s.lastImages...), append([]FileAttachment(nil), s.lastFiles...)
 }
 
 // controllableAgent lets tests control which session is returned by StartSession.
@@ -5952,6 +5974,128 @@ func TestCleanupCAS_UnconditionalWithoutExpected(t *testing.T) {
 
 	if current != nil {
 		t.Fatal("expected unconditional cleanup to delete state")
+	}
+}
+
+func TestProcessInteractiveMessageWith_AttachmentOnlyStoresForNextTurn(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	sess := newControllableSession("pending-attachments")
+	sess.workDir = t.TempDir()
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user-attachment-only"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+
+	e.processInteractiveMessageWith(p, &Message{
+		SessionKey: sessionKey,
+		ReplyCtx:   "ctx-1",
+		Images:     []ImageAttachment{{MimeType: "image/png", Data: []byte("png"), FileName: "a.png"}},
+		Files:      []FileAttachment{{MimeType: "text/plain", Data: []byte("txt"), FileName: "a.txt"}},
+	}, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+
+	sendCalls, _, sentImages, sentFiles := sess.SendSnapshot()
+	if sendCalls != 0 {
+		t.Fatalf("attachment-only turn should not call agent Send, got %d", sendCalls)
+	}
+	if len(sentImages) != 0 || len(sentFiles) != 0 {
+		t.Fatalf("attachment-only turn should not send attachments immediately, got images=%d files=%d", len(sentImages), len(sentFiles))
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "Attachment received and stored.") {
+		t.Fatalf("reply = %#v, want attachment stored hint", sent)
+	}
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		t.Fatal("expected interactive state to persist pending attachments")
+	}
+	state.mu.Lock()
+	pendingImages := len(state.pendingImages)
+	pendingFiles := len(state.pendingFiles)
+	pendingImagePath := ""
+	pendingFilePath := ""
+	if len(state.pendingImages) > 0 {
+		pendingImagePath = state.pendingImages[0].FileName
+	}
+	if len(state.pendingFiles) > 0 {
+		pendingFilePath = state.pendingFiles[0].FileName
+	}
+	state.mu.Unlock()
+	if pendingImages != 1 || pendingFiles != 1 {
+		t.Fatalf("pending attachments = (%d, %d), want (1, 1)", pendingImages, pendingFiles)
+	}
+	if !strings.Contains(pendingImagePath, filepath.Join("artifacts", "incoming", "images")) {
+		t.Fatalf("pending image path = %q, want incoming image artifact path", pendingImagePath)
+	}
+	if !strings.Contains(pendingFilePath, filepath.Join("artifacts", "incoming", "files")) {
+		t.Fatalf("pending file path = %q, want incoming file artifact path", pendingFilePath)
+	}
+}
+
+func TestProcessInteractiveMessageWith_NextTextConsumesPendingAttachments(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	sess := newControllableSession("consume-pending")
+	sess.workDir = t.TempDir()
+	sess.sendFn = func(prompt string, images []ImageAttachment, files []FileAttachment) error {
+		sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+		return nil
+	}
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user-attachment-followup"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+
+	if !session.TryLock() {
+		t.Fatal("expected initial session lock")
+	}
+	e.processInteractiveMessageWith(p, &Message{
+		SessionKey: sessionKey,
+		ReplyCtx:   "ctx-1",
+		Images:     []ImageAttachment{{MimeType: "image/png", Data: []byte("png"), FileName: "img.png"}},
+		Files:      []FileAttachment{{MimeType: "application/pdf", Data: []byte("pdf"), FileName: "doc.pdf"}},
+	}, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+
+	if !session.TryLock() {
+		t.Fatal("expected lock to be released after attachment-only turn")
+	}
+	p.clearSent()
+	e.processInteractiveMessageWith(p, &Message{
+		SessionKey: sessionKey,
+		ReplyCtx:   "ctx-2",
+		Content:    "帮我总结这个附件",
+	}, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+
+	sendCalls, lastPrompt, sentImages, sentFiles := sess.SendSnapshot()
+	if sendCalls != 1 {
+		t.Fatalf("follow-up text should call Send exactly once, got %d", sendCalls)
+	}
+	if !strings.Contains(lastPrompt, "帮我总结这个附件") {
+		t.Fatalf("prompt = %q, want follow-up text", lastPrompt)
+	}
+	if len(sentImages) != 1 || len(sentFiles) != 1 {
+		t.Fatalf("sent attachments = (%d, %d), want (1, 1)", len(sentImages), len(sentFiles))
+	}
+	if !filepath.IsAbs(sentImages[0].FileName) || !filepath.IsAbs(sentFiles[0].FileName) {
+		t.Fatalf("expected follow-up attachments to use staged absolute paths, got image=%q file=%q", sentImages[0].FileName, sentFiles[0].FileName)
+	}
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		t.Fatal("expected interactive state after follow-up turn")
+	}
+	state.mu.Lock()
+	remainingImages := len(state.pendingImages)
+	remainingFiles := len(state.pendingFiles)
+	state.mu.Unlock()
+	if remainingImages != 0 || remainingFiles != 0 {
+		t.Fatalf("pending attachments after send = (%d, %d), want (0, 0)", remainingImages, remainingFiles)
 	}
 }
 

@@ -175,14 +175,14 @@ const (
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	Mode               *string `toml:"mode"`                 // "full" (default), "compact", or "quiet"
-	CardMode           *string `toml:"card_mode"`            // "legacy" (default) or "rich" (Card 2.0 Feishu)
-	ThinkingMessages   *bool   `toml:"thinking_messages"`    // whether thinking messages are shown; default true
-	ThinkingMaxLen     *int    `toml:"thinking_max_len"`     // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen         *int    `toml:"tool_max_len"`         // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages       *bool   `toml:"tool_messages"`        // whether tool progress messages are shown; default true
-	ShowContextIndicator *bool `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
-	ReplyFooter        *bool   `toml:"reply_footer"`         // whether Codex-like footer is shown; default true
+	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
+	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
+	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
+	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
+	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -364,11 +364,12 @@ type ProjectConfig struct {
 	ShowContextIndicator *bool `toml:"show_context_indicator,omitempty"`
 	// ReplyFooter: nil/true = append a Codex-style footer; false = disable.
 	// (model/reasoning/usage/workdir, when available) to assistant replies.
-	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
-	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
-	DisabledCommands []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom        string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users            *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	ReplyFooter      *bool              `toml:"reply_footer,omitempty"`
+	InjectSender     *bool              `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
+	DisabledCommands []string           `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom        string             `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	HighRiskAuth     HighRiskAuthConfig `toml:"high_risk_auth"`
+	Users            *UsersConfig       `toml:"users,omitempty"` // per-user role config; nil = legacy behavior
 	// WorkspaceIdleTimeoutMinsLegacy is the deprecated per-project form of
 	// the workspace idle reaper timeout. New configs should set the top-level
 	// Config.WorkspaceIdleTimeoutMins instead. When the top-level field is
@@ -400,6 +401,16 @@ type ProjectConfig struct {
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
 	FilterExternalSessions *bool `toml:"filter_external_sessions,omitempty"`
+}
+
+type HighRiskAuthConfig struct {
+	Enabled          bool   `toml:"enabled"`
+	PasswordHash     string `toml:"password_hash,omitempty"`
+	UnlockWindowSecs int    `toml:"unlock_window_secs,omitempty"`
+	PendingTTLSecs   int    `toml:"pending_ttl_secs,omitempty"`
+	MaxFailures      int    `toml:"max_failures,omitempty"`
+	ChallengePrompt  string `toml:"challenge_prompt,omitempty"`
+	Scope            string `toml:"scope,omitempty"`
 }
 
 type AgentConfig struct {
@@ -824,9 +835,38 @@ func (c *Config) validate() error {
 		if err := validateUsersConfig(prefix, proj.Users); err != nil {
 			return err
 		}
+		if err := validateHighRiskAuthConfig(prefix, proj.HighRiskAuth); err != nil {
+			return err
+		}
 		if err := validateDisplayConfig(prefix+".display", proj.Display); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateHighRiskAuthConfig(prefix string, cfg HighRiskAuthConfig) error {
+	if !cfg.Enabled && strings.TrimSpace(cfg.PasswordHash) == "" &&
+		cfg.UnlockWindowSecs == 0 && cfg.PendingTTLSecs == 0 &&
+		cfg.MaxFailures == 0 && strings.TrimSpace(cfg.ChallengePrompt) == "" &&
+		strings.TrimSpace(cfg.Scope) == "" {
+		return nil
+	}
+	if cfg.Enabled && strings.TrimSpace(cfg.PasswordHash) == "" {
+		return fmt.Errorf("config: %s.high_risk_auth.password_hash is required when enabled", prefix)
+	}
+	if cfg.UnlockWindowSecs < 0 {
+		return fmt.Errorf("config: %s.high_risk_auth.unlock_window_secs must be >= 0", prefix)
+	}
+	if cfg.PendingTTLSecs < 0 {
+		return fmt.Errorf("config: %s.high_risk_auth.pending_ttl_secs must be >= 0", prefix)
+	}
+	if cfg.MaxFailures < 0 {
+		return fmt.Errorf("config: %s.high_risk_auth.max_failures must be >= 0", prefix)
+	}
+	scope := strings.ToLower(strings.TrimSpace(cfg.Scope))
+	if scope != "" && scope != "user" {
+		return fmt.Errorf("config: %s.high_risk_auth.scope must be \"user\"", prefix)
 	}
 	return nil
 }
@@ -3000,6 +3040,21 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.InjectSender != nil {
 			result["inject_sender"] = *p.InjectSender
+		}
+		if p.HighRiskAuth.Enabled || strings.TrimSpace(p.HighRiskAuth.PasswordHash) != "" {
+			unlockWindowSecs := p.HighRiskAuth.UnlockWindowSecs
+			if unlockWindowSecs == 0 {
+				unlockWindowSecs = 600
+			}
+			scope := strings.TrimSpace(p.HighRiskAuth.Scope)
+			if scope == "" {
+				scope = "user"
+			}
+			result["high_risk_auth"] = map[string]any{
+				"enabled":            p.HighRiskAuth.Enabled,
+				"unlock_window_secs": unlockWindowSecs,
+				"scope":              scope,
+			}
 		}
 		platConfigs := make([]map[string]any, len(p.Platforms))
 		for j, plat := range p.Platforms {

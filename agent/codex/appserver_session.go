@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -476,20 +475,9 @@ func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachm
 		return prompt, nil, nil
 	}
 
-	imgDir := filepath.Join(s.workDir, ".cc-connect", "images")
-	if err := os.MkdirAll(imgDir, 0o755); err != nil {
-		return "", nil, fmt.Errorf("codex app-server: create image dir: %w", err)
-	}
-
-	imagePaths := make([]string, 0, len(images))
-	for i, img := range images {
-		ext := codexImageExt(img.MimeType)
-		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
-		fpath := filepath.Join(imgDir, fname)
-		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
-			return "", nil, fmt.Errorf("codex app-server: save image: %w", err)
-		}
-		imagePaths = append(imagePaths, fpath)
+	imagePaths := core.SaveImagesToDisk(s.workDir, images)
+	if len(imagePaths) != len(images) {
+		return "", nil, fmt.Errorf("codex app-server: save image")
 	}
 
 	if strings.TrimSpace(prompt) == "" {

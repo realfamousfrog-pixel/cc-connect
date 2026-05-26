@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,20 +27,20 @@ type codexSession struct {
 	model         string
 	effort        string
 	mode          string
-	baseURL       string // provider base URL; passed as -c openai_base_url=<url>
-	modelProvider string // Codex model_provider name; passed as -c model_provider=<name>
+	baseURL       string   // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider string   // Codex model_provider name; passed as -c model_provider=<name>
 	cliBin        string   // CLI binary, default "codex"
 	cliExtraArgs  []string // extra args from cli_path, prepended before exec args
 	extraEnv      []string
 	events        chan core.Event
-	threadID  atomic.Value // stores string — Codex thread_id
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
-	closeOnce sync.Once
-	cmdMu     sync.Mutex
-	cmds      map[*exec.Cmd]struct{}
+	threadID      atomic.Value // stores string — Codex thread_id
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	alive         atomic.Bool
+	closeOnce     sync.Once
+	cmdMu         sync.Mutex
+	cmds          map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 
@@ -152,20 +151,9 @@ func (cs *codexSession) stageImages(prompt string, images []core.ImageAttachment
 		return prompt, nil, nil
 	}
 
-	imgDir := filepath.Join(cs.workDir, ".cc-connect", "images")
-	if err := os.MkdirAll(imgDir, 0o755); err != nil {
-		return "", nil, fmt.Errorf("codexSession: create image dir: %w", err)
-	}
-
-	imagePaths := make([]string, 0, len(images))
-	for i, img := range images {
-		ext := codexImageExt(img.MimeType)
-		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
-		fpath := filepath.Join(imgDir, fname)
-		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
-			return "", nil, fmt.Errorf("codexSession: save image: %w", err)
-		}
-		imagePaths = append(imagePaths, fpath)
+	imagePaths := core.SaveImagesToDisk(cs.workDir, images)
+	if len(imagePaths) != len(images) {
+		return "", nil, fmt.Errorf("codexSession: save image")
 	}
 
 	if strings.TrimSpace(prompt) == "" {
@@ -223,19 +211,6 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		args = append(args, "--json", "--cd", cs.workDir, "-")
 	}
 	return args
-}
-
-func codexImageExt(mime string) string {
-	switch mime {
-	case "image/jpeg":
-		return ".jpg"
-	case "image/gif":
-		return ".gif"
-	case "image/webp":
-		return ".webp"
-	default:
-		return ".png"
-	}
 }
 
 func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {

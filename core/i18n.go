@@ -184,6 +184,7 @@ const (
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
+	MsgAttachmentStored          MsgKey = "attachment_stored"
 	MsgPermissionPrompt          MsgKey = "permission_prompt"
 	MsgPermissionAllowed         MsgKey = "permission_allowed"
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
@@ -798,6 +799,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "(空回應)",
 		LangJapanese:           "（空のレスポンス）",
 		LangSpanish:            "(respuesta vacía)",
+	},
+	MsgAttachmentStored: {
+		LangEnglish:            "Attachment received and stored.\nSend your next message with instructions for how I should handle it.",
+		LangChinese:            "附件已收到并存放。\n请下一条消息再告诉我要如何处理它。",
+		LangTraditionalChinese: "附件已收到並存放。\n請下一條訊息再告訴我要如何處理它。",
+		LangJapanese:           "添付ファイルを受け取り保存しました。\n次のメッセージで処理方法を教えてください。",
+		LangSpanish:            "Adjunto recibido y guardado.\nEn tu siguiente mensaje indícame cómo quieres que lo procese.",
 	},
 	MsgPermissionPrompt: {
 		LangEnglish:            "⚠️ **Permission Request**\n\nAgent wants to use **%s**:\n\n```\n%s\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).",
