@@ -337,6 +337,58 @@ func TestMgmt_Sessions(t *testing.T) {
 	}
 }
 
+func TestMgmt_SessionsListHidesEmptyPlaceholders(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	started := e.sessions.NewSession("user-started", "聊天")
+	started.AddHistory("user", "hello")
+
+	tracked := e.sessions.NewSession("user-tracked", "kept-agent")
+	tracked.SetAgentSessionID("agent-1", "codex")
+
+	pastTracked := e.sessions.NewSession("user-past", "kept-past")
+	pastTracked.SetAgentSessionID("agent-2", "codex")
+	pastTracked.SetAgentSessionID("", "")
+
+	e.sessions.NewSession("user-empty-1", "聊天")
+	e.sessions.NewSession("user-empty-2", "draft")
+	e.sessions.GetOrCreateActive("user-default")
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	if !r.OK {
+		t.Fatalf("sessions list failed: %s", r.Error)
+	}
+
+	var data struct {
+		Sessions []struct {
+			ID           string `json:"id"`
+			Name         string `json:"name"`
+			HistoryCount int    `json:"history_count"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal sessions list: %v", err)
+	}
+
+	if len(data.Sessions) != 3 {
+		t.Fatalf("expected 3 visible sessions, got %d: %#v", len(data.Sessions), data.Sessions)
+	}
+
+	nameCount := make(map[string]int)
+	for _, s := range data.Sessions {
+		nameCount[s.Name]++
+	}
+	if nameCount["聊天"] != 1 {
+		t.Fatalf("expected exactly one visible 聊天 session, got %d", nameCount["聊天"])
+	}
+	if nameCount["draft"] != 0 {
+		t.Fatalf("expected empty placeholder draft session to be hidden, got %d", nameCount["draft"])
+	}
+	if nameCount["kept-agent"] != 1 || nameCount["kept-past"] != 1 {
+		t.Fatalf("expected tracked sessions to remain visible, got counts=%v", nameCount)
+	}
+}
+
 func TestMgmt_SessionDetail(t *testing.T) {
 	_, ts, e := testManagementServer(t, "tok")
 

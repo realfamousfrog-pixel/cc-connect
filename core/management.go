@@ -925,6 +925,12 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 		for _, s := range stored {
 			s.mu.Lock()
 			histCount := len(s.History)
+			agentSessionID := s.AgentSessionID
+			pastAgentSessionCount := len(s.PastAgentSessionIDs)
+			if histCount == 0 && agentSessionID == "" && pastAgentSessionCount == 0 {
+				s.mu.Unlock()
+				continue
+			}
 			var lastMsg map[string]any
 			if histCount > 0 {
 				last := s.History[histCount-1]

@@ -399,6 +399,8 @@ cc-connect update --pre     # Include pre-releases
 /dir [path|reset] Show, switch, or reset work directory
 ```
 
+The Web session drawer and `/list` only show sessions that have actually started: a session must have message history or a tracked agent session ID. Brand-new placeholder sessions created by `/new` stay hidden until they become real conversations.
+
 Project configs rotate to a fresh session automatically after long inactivity. This prevents "context drift" where stale chat history (failed commands, debugging noise) is repeatedly re-ingested via `--continue` and starts to dominate the model's attention. The previous session is preserved and remains accessible via `/list` and `/switch`.
 
 ```toml
