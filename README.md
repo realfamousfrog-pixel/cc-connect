@@ -535,6 +535,7 @@ Incoming attachments from chat apps are stored per session under `artifacts/sess
 Regular files are staged directly into that session folder. Images are saved first, then cc-connect asks the user to name them before they become pending attachments for the session.
 If the user sends only an attachment without text, cc-connect stores it first and waits for the next text message before asking the agent to process it.
 cc-connect does not auto-generate a `notes.md` file for incoming attachments.
+When deleting a session, if a local session folder already exists, cc-connect asks whether that folder should be deleted too.
 New sessions must be explicitly named with `/new <session name>`, for example `/new expense reconciliation`.
 
 📖 **Full documentation:** [docs/usage.md](docs/usage.md)

@@ -462,6 +462,10 @@ const (
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
+	MsgDeleteSuccessWithArtifact MsgKey = "delete_success_with_artifact"
+	MsgDeleteSuccessWithArtifactFailed MsgKey = "delete_success_with_artifact_failed"
+	MsgDeleteConfirmArtifactsPromptSingle MsgKey = "delete_confirm_artifacts_prompt_single"
+	MsgDeleteConfirmArtifactsPromptBatch MsgKey = "delete_confirm_artifacts_prompt_batch"
 	MsgDeleteActiveDenied       MsgKey = "delete_active_denied"
 	MsgDeleteNotSupported       MsgKey = "delete_not_supported"
 	MsgDeleteModeTitle          MsgKey = "delete_mode_title"
@@ -472,8 +476,10 @@ const (
 	MsgDeleteModeCancel         MsgKey = "delete_mode_cancel"
 	MsgDeleteModeConfirmTitle   MsgKey = "delete_mode_confirm_title"
 	MsgDeleteModeConfirmButton  MsgKey = "delete_mode_confirm_button"
+	MsgDeleteModeConfirmButtonWithArtifacts MsgKey = "delete_mode_confirm_button_with_artifacts"
 	MsgDeleteModeBackButton     MsgKey = "delete_mode_back_button"
 	MsgDeleteModeEmptySelection MsgKey = "delete_mode_empty_selection"
+	MsgDeleteModeArtifactHint   MsgKey = "delete_mode_artifact_hint"
 	MsgDeleteModeResultTitle    MsgKey = "delete_mode_result_title"
 	MsgDeleteModeDeletingTitle  MsgKey = "delete_mode_deleting_title"
 	MsgDeleteModeDeletingBody   MsgKey = "delete_mode_deleting_body"
@@ -2984,6 +2990,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "🗑️ セッション削除：%s",
 		LangSpanish:            "🗑️ Sesión eliminada: %s",
 	},
+	MsgDeleteSuccessWithArtifact: {
+		LangEnglish:            "🗑️ Session deleted: %s\n📁 Local session folder deleted: %s",
+		LangChinese:            "🗑️ 会话已删除：%s\n📁 本地会话目录已删除：%s",
+		LangTraditionalChinese: "🗑️ 會話已刪除：%s\n📁 本地會話目錄已刪除：%s",
+		LangJapanese:           "🗑️ セッション削除：%s\n📁 ローカルのセッションフォルダも削除しました：%s",
+		LangSpanish:            "🗑️ Sesión eliminada: %s\n📁 Carpeta local eliminada: %s",
+	},
+	MsgDeleteSuccessWithArtifactFailed: {
+		LangEnglish:            "🗑️ Session deleted: %s\n⚠️ Local session folder could not be deleted: %s (%v)",
+		LangChinese:            "🗑️ 会话已删除：%s\n⚠️ 本地会话目录删除失败：%s（%v）",
+		LangTraditionalChinese: "🗑️ 會話已刪除：%s\n⚠️ 本地會話目錄刪除失敗：%s（%v）",
+		LangJapanese:           "🗑️ セッション削除：%s\n⚠️ ローカルのセッションフォルダを削除できませんでした：%s（%v）",
+		LangSpanish:            "🗑️ Sesión eliminada: %s\n⚠️ No se pudo eliminar la carpeta local: %s (%v)",
+	},
+	MsgDeleteConfirmArtifactsPromptSingle: {
+		LangEnglish:            "The session `%s` has a local session folder `%s`.\nReply `yes` to delete the session and folder together, or reply `no` to delete only the session.",
+		LangChinese:            "检测到会话 `%s` 有本地会话目录 `%s`。\n回复 `yes` 表示同时删除会话和目录，回复 `no` 表示只删除会话。",
+		LangTraditionalChinese: "偵測到會話 `%s` 有本地會話目錄 `%s`。\n回覆 `yes` 表示同時刪除會話和目錄，回覆 `no` 表示只刪除會話。",
+		LangJapanese:           "セッション `%s` にはローカルフォルダ `%s` があります。\nセッションとフォルダを一緒に削除するには `yes`、セッションだけ削除するには `no` と返信してください。",
+		LangSpanish:            "La sesión `%s` tiene una carpeta local `%s`.\nResponda `yes` para eliminar sesión y carpeta, o `no` para eliminar solo la sesión.",
+	},
+	MsgDeleteConfirmArtifactsPromptBatch: {
+		LangEnglish:            "Among the %d selected sessions, local session folders were found: %s\nReply `yes` to delete the sessions and folders together, or reply `no` to delete only the sessions.",
+		LangChinese:            "已选的 %d 个会话中发现本地会话目录：%s\n回复 `yes` 表示同时删除会话和这些目录，回复 `no` 表示只删除会话。",
+		LangTraditionalChinese: "已選的 %d 個會話中發現本地會話目錄：%s\n回覆 `yes` 表示同時刪除會話和這些目錄，回覆 `no` 表示只刪除會話。",
+		LangJapanese:           "選択した %d 件のセッションにローカルフォルダがあります：%s\nセッションとフォルダを一緒に削除するには `yes`、セッションだけ削除するには `no` と返信してください。",
+		LangSpanish:            "Entre las %d sesiones seleccionadas se encontraron carpetas locales: %s\nResponda `yes` para eliminar sesiones y carpetas, o `no` para eliminar solo las sesiones.",
+	},
 	MsgSwitchSuccess: {
 		LangEnglish:            "✅ Switched to: %s (%s, %d msgs)",
 		LangChinese:            "✅ 已切换到：%s（%s，%d 条消息）",
@@ -3082,6 +3116,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "削除を確認",
 		LangSpanish:            "Confirmar eliminación",
 	},
+	MsgDeleteModeConfirmButtonWithArtifacts: {
+		LangEnglish:            "Delete Sessions And Folders",
+		LangChinese:            "删除会话并删除目录",
+		LangTraditionalChinese: "刪除會話並刪除目錄",
+		LangJapanese:           "セッションとフォルダを削除",
+		LangSpanish:            "Eliminar sesiones y carpetas",
+	},
 	MsgDeleteModeBackButton: {
 		LangEnglish:            "Back",
 		LangChinese:            "返回继续选择",
@@ -3095,6 +3136,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "請至少選擇一個會話。",
 		LangJapanese:           "少なくとも 1 つのセッションを選択してください。",
 		LangSpanish:            "Seleccione al menos una sesión.",
+	},
+	MsgDeleteModeArtifactHint: {
+		LangEnglish:            "Some selected sessions also have local session folders. Choose whether to keep or delete those folders together.",
+		LangChinese:            "所选会话中有本地会话目录。请明确选择是保留目录，还是和会话一起删除。",
+		LangTraditionalChinese: "所選會話中有本地會話目錄。請明確選擇保留目錄，或與會話一起刪除。",
+		LangJapanese:           "選択したセッションにはローカルフォルダもあります。フォルダを残すか、一緒に削除するか選択してください。",
+		LangSpanish:            "Algunas sesiones seleccionadas también tienen carpetas locales. Elija si desea conservarlas o eliminarlas junto con la sesión.",
 	},
 	MsgDeleteModeResultTitle: {
 		LangEnglish:            "Delete Result",

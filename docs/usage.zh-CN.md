@@ -35,6 +35,7 @@ cc-connect 完整功能使用指南。
 | `/new <名称>` | 创建具名新会话 |
 | `/list` | 列出当前项目的会话 |
 | `/switch <id>` | 切换到指定会话 |
+| `/delete <序号>` | 删除指定会话；若该会话已有本地会话目录，会先询问是否同时删除目录 |
 | `/current` | 查看当前会话 |
 | `/history [n]` | 查看最近 n 条消息 |
 | `/usage` | 查看账号/模型限额使用情况 |
@@ -670,6 +671,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 - 图片会先落盘，然后由 cc-connect 询问用户命名；命名完成后才会作为当前会话的待处理附件。
 - 如果用户只发送附件而不附带文字，cc-connect 会先完成入库，等待下一条文字消息再交给 agent 处理。
 - cc-connect 不会为这些入站附件默认自动生成 `notes.md`。
+- 删除会话时，如果该会话目录下已有本地产物，cc-connect 会先询问是否同时删除对应目录。
 
 ---
 

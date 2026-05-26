@@ -325,6 +325,7 @@ type interactiveState struct {
 	pendingFiles           []FileAttachment
 	awaitingImageNaming    []pendingNamedImage
 	awaitingImagePrompted  bool
+	pendingDelete          *pendingDeleteState
 	deleteMode             *deleteModeState
 	modelSwitch            *modelSwitchState
 	pendingProviderAdd     *pendingProviderAddState
@@ -358,6 +359,11 @@ type pendingProviderAddState struct {
 	inviteURL        string
 	codexWireAPI     string
 	codexHTTPHeaders map[string]string
+}
+
+type pendingDeleteState struct {
+	selectedIDs map[string]struct{}
+	prompt      string
 }
 
 type deleteModeState struct {
@@ -2089,6 +2095,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+	if e.handlePendingDelete(p, msg, content, interactiveKey) {
+		return
+	}
+
 	// "!" prefix: treat as shell command (same as /shell)
 	// Placed after permission handling so "!yes" doesn't hijack permission responses.
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "!") {
@@ -2725,6 +2735,67 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 	pending.resolve()
 
 	return true
+}
+
+func (e *Engine) handlePendingDelete(p Platform, msg *Message, content string, interactiveKey string) bool {
+	if interactiveKey == "" {
+		interactiveKey = e.interactiveKeyForSessionKey(msg.SessionKey)
+	}
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return false
+	}
+
+	state.mu.Lock()
+	pending := state.pendingDelete
+	if strings.HasPrefix(strings.TrimSpace(content), "/") {
+		state.pendingDelete = nil
+		state.mu.Unlock()
+		return false
+	}
+	state.mu.Unlock()
+	if pending == nil {
+		return false
+	}
+
+	lower := strings.ToLower(strings.TrimSpace(content))
+	var deleteArtifacts bool
+	switch {
+	case isDeleteConfirmYes(lower):
+		deleteArtifacts = true
+	case isDeleteConfirmNo(lower):
+		deleteArtifacts = false
+	default:
+		e.reply(p, msg.ReplyCtx, pending.prompt)
+		return true
+	}
+
+	lines := e.submitDeleteModeSelection(msg.SessionKey, pending.selectedIDs, deleteArtifacts)
+	state.mu.Lock()
+	state.pendingDelete = nil
+	state.mu.Unlock()
+	e.reply(p, msg.ReplyCtx, strings.Join(lines, "\n"))
+	return true
+}
+
+func isDeleteConfirmYes(lower string) bool {
+	switch lower {
+	case "yes", "y", "是", "好的", "可以", "删除", "刪除", "一起删除", "一起刪除", "同时删除", "同時刪除":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDeleteConfirmNo(lower string) bool {
+	switch lower {
+	case "no", "n", "否", "不用", "不删", "不刪", "保留", "只删会话", "只刪會話", "只删会话保留文件夹", "只刪會話保留資料夾":
+		return true
+	default:
+		return false
+	}
 }
 
 // resolveAskQuestionAnswer converts user input into answer text.
@@ -10189,7 +10260,7 @@ func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
 	}
 	switch dm.phase {
 	case "confirm":
-		return e.renderDeleteModeConfirmCard(sessions, dm, agentSessions)
+		return e.renderDeleteModeConfirmCard(sessionKey, sessions, dm, agentSessions)
 	case "result":
 		return e.renderDeleteModeResultCard(dm)
 	case "deleting":
@@ -10275,20 +10346,33 @@ func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *Session
 	return cb.Build()
 }
 
-func (e *Engine) renderDeleteModeConfirmCard(sessions *SessionManager, dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
+func (e *Engine) renderDeleteModeConfirmCard(sessionKey string, sessions *SessionManager, dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
 	selectedNames := e.deleteModeSelectionNames(sessions, dm, agentSessions)
 	body := strings.Join(selectedNames, "\n")
 	if body == "" {
 		body = e.i18n.T(MsgDeleteModeEmptySelection)
 	}
-	return NewCard().
+	hasArtifacts := e.selectionHasArtifacts(sessionKey, sessions, dm.selectedIDs)
+	bodyParts := []string{body}
+	if hasArtifacts {
+		bodyParts = append(bodyParts, e.i18n.T(MsgDeleteModeArtifactHint))
+	}
+	card := NewCard().
 		Title(e.i18n.T(MsgDeleteModeConfirmTitle), "carmine").
-		Markdown(body).
-		Buttons(
-			DangerBtn(e.i18n.T(MsgDeleteModeConfirmButton), "act:/delete-mode submit"),
+		Markdown(strings.Join(bodyParts, "\n\n"))
+	if hasArtifacts {
+		card.Buttons(
+			DangerBtn(e.i18n.T(MsgDeleteModeConfirmButton), "act:/delete-mode submit keep"),
+			DangerBtn(e.i18n.T(MsgDeleteModeConfirmButtonWithArtifacts), "act:/delete-mode submit delete-files"),
 			DefaultBtn(e.i18n.T(MsgDeleteModeBackButton), "act:/delete-mode back"),
-		).
-		Build()
+		)
+	} else {
+		card.Buttons(
+			DangerBtn(e.i18n.T(MsgDeleteModeConfirmButton), "act:/delete-mode submit keep"),
+			DefaultBtn(e.i18n.T(MsgDeleteModeBackButton), "act:/delete-mode back"),
+		)
+	}
+	return card.Build()
 }
 
 func (e *Engine) renderDeleteModeResultCard(dm *deleteModeState) *Card {
@@ -10310,8 +10394,8 @@ func (e *Engine) renderDeleteModeDeletingCard(dm *deleteModeState) *Card {
 // goroutine so that the card callback can return immediately with a "deleting"
 // indicator. Once all deletions finish it updates the interactive state and
 // pushes a result card to the originating platform.
-func (e *Engine) performDeleteModeAsync(sessionKey string, selectedIDs map[string]struct{}) {
-	lines := e.submitDeleteModeSelection(sessionKey, selectedIDs)
+func (e *Engine) performDeleteModeAsync(sessionKey string, selectedIDs map[string]struct{}, deleteArtifacts bool) {
+	lines := e.submitDeleteModeSelection(sessionKey, selectedIDs, deleteArtifacts)
 	result := strings.Join(lines, "\n")
 
 	// Update the interactive state to "result" phase.
@@ -10501,6 +10585,7 @@ func (e *Engine) executeDeleteModeAction(sessionKey, args string) {
 	case "back":
 		dm.phase = "select"
 	case "submit":
+		deleteArtifacts := len(fields) > 1 && fields[1] == "delete-files"
 		// Capture selected IDs and switch to "deleting" phase immediately
 		// so the card callback can return a loading card without blocking.
 		ids := make(map[string]struct{}, len(dm.selectedIDs))
@@ -10510,7 +10595,7 @@ func (e *Engine) executeDeleteModeAction(sessionKey, args string) {
 		dm.selectedIDs = make(map[string]struct{})
 		dm.phase = "deleting"
 		dm.hint = e.i18n.Tf(MsgDeleteModeDeletingBody, len(ids))
-		go e.performDeleteModeAsync(sessionKey, ids)
+		go e.performDeleteModeAsync(sessionKey, ids, deleteArtifacts)
 	case "form-submit":
 		dm.selectedIDs = parseDeleteModeSelectedIDs(fields[1:])
 		if len(dm.selectedIDs) == 0 {
@@ -10539,7 +10624,7 @@ func parseDeleteModeSelectedIDs(args []string) map[string]struct{} {
 	return ids
 }
 
-func (e *Engine) submitDeleteModeSelection(sessionKey string, selectedIDs map[string]struct{}) []string {
+func (e *Engine) submitDeleteModeSelection(sessionKey string, selectedIDs map[string]struct{}, deleteArtifacts bool) []string {
 	agent, sessions := e.sessionContextForKey(sessionKey)
 	deleter, ok := agent.(SessionDeleter)
 	if !ok {
@@ -10557,7 +10642,7 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, selectedIDs map[st
 		if _, ok := selectedIDs[agentSessions[i].ID]; !ok {
 			continue
 		}
-		if line := e.deleteSingleSessionReply(&Message{SessionKey: sessionKey}, deleter, &agentSessions[i]); line != "" {
+		if line := e.deleteSingleSessionReply(&Message{SessionKey: sessionKey}, deleter, &agentSessions[i], deleteArtifacts); line != "" {
 			lines = append(lines, line)
 		}
 	}
@@ -12940,10 +13025,15 @@ func parseDeleteBatchIndices(spec string, max int) ([]int, error) {
 }
 
 func (e *Engine) cmdDeleteBatch(p Platform, msg *Message, deleter SessionDeleter, sessions []AgentSessionInfo, indices []int) {
+	if pending, ok := e.buildPendingDeleteRequest(msg, sessions, indices); ok {
+		e.storePendingDelete(msg.SessionKey, p, msg.ReplyCtx, pending)
+		e.reply(p, msg.ReplyCtx, pending.prompt)
+		return
+	}
 	lines := make([]string, 0, len(indices))
 	for _, idx := range indices {
 		matched := &sessions[idx-1]
-		if line := e.deleteSingleSessionReply(msg, deleter, matched); line != "" {
+		if line := e.deleteSingleSessionReply(msg, deleter, matched, false); line != "" {
 			lines = append(lines, line)
 		}
 	}
@@ -12955,10 +13045,18 @@ func (e *Engine) cmdDeleteBatch(p Platform, msg *Message, deleter SessionDeleter
 }
 
 func (e *Engine) deleteSingleSession(p Platform, msg *Message, deleter SessionDeleter, matched *AgentSessionInfo) {
-	e.reply(p, msg.ReplyCtx, e.deleteSingleSessionReply(msg, deleter, matched))
+	if matched == nil {
+		return
+	}
+	if plan := e.buildSinglePendingDelete(msg, matched); plan != nil {
+		e.storePendingDelete(msg.SessionKey, p, msg.ReplyCtx, plan)
+		e.reply(p, msg.ReplyCtx, plan.prompt)
+		return
+	}
+	e.reply(p, msg.ReplyCtx, e.deleteSingleSessionReply(msg, deleter, matched, false))
 }
 
-func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, matched *AgentSessionInfo) string {
+func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, matched *AgentSessionInfo, deleteArtifacts bool) string {
 	if matched == nil {
 		return ""
 	}
@@ -12971,6 +13069,7 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 	}
 
 	displayName := e.deleteSessionDisplayName(sessions, matched)
+	artifactInfo := e.findSessionArtifactDir(msg, matched.ID, sessions)
 
 	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
 		return e.i18n.Tf(MsgFailedToDeleteSession, displayName, err)
@@ -12979,7 +13078,157 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 	// Keep local session snapshot aligned with agent-side deletion.
 	sessions.DeleteByAgentSessionID(matched.ID)
 	sessions.SetSessionName(matched.ID, "")
+	if deleteArtifacts && artifactInfo.Exists {
+		if err := removeSessionArtifactDir(artifactInfo.Root, artifactInfo.Path); err != nil {
+			return e.i18n.Tf(MsgDeleteSuccessWithArtifactFailed, displayName, filepath.Base(artifactInfo.Path), err)
+		}
+		return e.i18n.Tf(MsgDeleteSuccessWithArtifact, displayName, filepath.Base(artifactInfo.Path))
+	}
 	return fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), displayName)
+}
+
+type sessionArtifactInfo struct {
+	Root string
+	Path string
+	Dir  string
+	Exists bool
+}
+
+func (e *Engine) findSessionArtifactDir(msg *Message, agentSessionID string, sessions *SessionManager) sessionArtifactInfo {
+	if sessions == nil || agentSessionID == "" {
+		return sessionArtifactInfo{}
+	}
+	var target *Session
+	idToKey, _ := sessions.SessionKeyMap()
+	for id := range idToKey {
+		snap := sessions.FindByID(id)
+		if snap == nil {
+			continue
+		}
+		snap.mu.Lock()
+		matched := snap.AgentSessionID == agentSessionID
+		snap.mu.Unlock()
+		if matched {
+			target = snap
+			break
+		}
+	}
+	if target == nil {
+		return sessionArtifactInfo{}
+	}
+	dir := strings.TrimSpace(target.GetArchiveDir())
+	if dir == "" {
+		return sessionArtifactInfo{}
+	}
+	agent, _ := e.sessionContextForKey(msg.SessionKey)
+	root := resolveSessionArchiveRoot(e.sessionArchiveDir, e.commandWorkDir(agent, msg), nil, agent)
+	if root == "" {
+		return sessionArtifactInfo{}
+	}
+	path := filepath.Join(root, dir)
+	_, err := os.Stat(path)
+	return sessionArtifactInfo{
+		Root:   root,
+		Path:   path,
+		Dir:    dir,
+		Exists: err == nil,
+	}
+}
+
+type pendingDeletePlan = pendingDeleteState
+
+func (e *Engine) buildSinglePendingDelete(msg *Message, matched *AgentSessionInfo) *pendingDeletePlan {
+	if matched == nil {
+		return nil
+	}
+	_, sessions := e.sessionContextForKey(msg.SessionKey)
+	info := e.findSessionArtifactDir(msg, matched.ID, sessions)
+	if !info.Exists {
+		return nil
+	}
+	displayName := e.deleteSessionDisplayName(sessions, matched)
+	return &pendingDeletePlan{
+		selectedIDs: map[string]struct{}{matched.ID: {}},
+		prompt: e.i18n.Tf(MsgDeleteConfirmArtifactsPromptSingle, displayName, filepath.Base(info.Path)),
+	}
+}
+
+func (e *Engine) buildPendingDeleteRequest(msg *Message, agentSessions []AgentSessionInfo, indices []int) (*pendingDeletePlan, bool) {
+	if len(indices) == 0 {
+		return nil, false
+	}
+	_, sessions := e.sessionContextForKey(msg.SessionKey)
+	selected := make(map[string]struct{}, len(indices))
+	var dirs []string
+	for _, idx := range indices {
+		if idx < 1 || idx > len(agentSessions) {
+			continue
+		}
+		sessionInfo := agentSessions[idx-1]
+		selected[sessionInfo.ID] = struct{}{}
+		info := e.findSessionArtifactDir(msg, sessionInfo.ID, sessions)
+		if info.Exists {
+			dirs = append(dirs, filepath.Base(info.Path))
+		}
+	}
+	if len(dirs) == 0 {
+		return nil, false
+	}
+	sort.Strings(dirs)
+	return &pendingDeletePlan{
+		selectedIDs: selected,
+		prompt:      e.i18n.Tf(MsgDeleteConfirmArtifactsPromptBatch, len(selected), strings.Join(dirs, "、")),
+	}, true
+}
+
+func (e *Engine) selectionHasArtifacts(sessionKey string, sessions *SessionManager, selectedIDs map[string]struct{}) bool {
+	if len(selectedIDs) == 0 {
+		return false
+	}
+	msg := &Message{SessionKey: sessionKey}
+	for id := range selectedIDs {
+		if e.findSessionArtifactDir(msg, id, sessions).Exists {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) storePendingDelete(sessionKey string, p Platform, replyCtx any, pending *pendingDeletePlan) {
+	if pending == nil {
+		return
+	}
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	if state == nil {
+		state = &interactiveState{platform: p, replyCtx: replyCtx, eventsNeedResync: true}
+		e.interactiveStates[interactiveKey] = state
+	} else {
+		state.platform = p
+		state.replyCtx = replyCtx
+	}
+	e.interactiveMu.Unlock()
+
+	state.mu.Lock()
+	state.pendingDelete = pending
+	state.mu.Unlock()
+}
+
+func removeSessionArtifactDir(root, target string) error {
+	root = filepath.Clean(root)
+	target = filepath.Clean(target)
+	if root == "" || target == "" {
+		return fmt.Errorf("invalid artifact path")
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return err
+	}
+	if rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return fmt.Errorf("target escapes archive root")
+	}
+	return os.RemoveAll(target)
 }
 
 func (e *Engine) deleteSessionDisplayName(sessions *SessionManager, matched *AgentSessionInfo) string {

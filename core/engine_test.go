@@ -601,6 +601,19 @@ func (a *stubDeleteAgent) DeleteSession(_ context.Context, sessionID string) err
 	return nil
 }
 
+type stubDeleteWorkDirAgent struct {
+	stubDeleteAgent
+	workDir string
+}
+
+func (a *stubDeleteWorkDirAgent) SetWorkDir(dir string) {
+	a.workDir = dir
+}
+
+func (a *stubDeleteWorkDirAgent) GetWorkDir() string {
+	return a.workDir
+}
+
 // waitDeleteModePhase polls the delete-mode state for the given session key
 // until it reaches the target phase or the timeout expires.
 func waitDeleteModePhase(t *testing.T, e *Engine, sessionKey, targetPhase string) {
@@ -3363,6 +3376,94 @@ func TestCmdDelete_SyncsLocalSessionSnapshot(t *testing.T) {
 	}
 }
 
+func TestCmdDelete_WithArtifactsPromptsBeforeDeleting(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteWorkDirAgent{stubDeleteAgent: stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+	}}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	workDir := t.TempDir()
+	agent.SetWorkDir(workDir)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	victim := e.sessions.NewSession("test:user2", "victim")
+	victim.SetAgentSessionID("session-1", "stub")
+	victim.SetArchiveDir(victim.ID + "__victim")
+	artifactDir := filepath.Join(workDir, "artifacts", "sessions", victim.GetArchiveDir())
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e.cmdDelete(p, msg, []string{"1"})
+
+	if len(agent.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none before confirmation", agent.deleted)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "delete the session and folder together") {
+		t.Fatalf("reply = %v, want artifact confirmation prompt", p.sent)
+	}
+}
+
+func TestHandlePendingDelete_YesDeletesArtifacts(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteWorkDirAgent{stubDeleteAgent: stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+	}}}}
+	workDir := t.TempDir()
+	agent.SetWorkDir(workDir)
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	victim := e.sessions.NewSession("test:user2", "victim")
+	victim.SetAgentSessionID("session-1", "stub")
+	victim.SetArchiveDir(victim.ID + "__victim")
+	artifactDir := filepath.Join(workDir, "artifacts", "sessions", victim.GetArchiveDir())
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e.cmdDelete(p, msg, []string{"1"})
+	e.handleMessage(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx", Content: "yes", Platform: "plain"})
+
+	if got, want := strings.Join(agent.deleted, ","), "session-1"; got != want {
+		t.Fatalf("deleted = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(artifactDir); !os.IsNotExist(err) {
+		t.Fatalf("artifact dir still exists, err=%v", err)
+	}
+	if got := e.sessions.FindByID(victim.ID); got != nil {
+		t.Fatalf("victim session should be removed, got %+v", got)
+	}
+}
+
+func TestHandlePendingDelete_NoKeepsArtifacts(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteWorkDirAgent{stubDeleteAgent: stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+	}}}}
+	workDir := t.TempDir()
+	agent.SetWorkDir(workDir)
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	victim := e.sessions.NewSession("test:user2", "victim")
+	victim.SetAgentSessionID("session-1", "stub")
+	victim.SetArchiveDir(victim.ID + "__victim")
+	artifactDir := filepath.Join(workDir, "artifacts", "sessions", victim.GetArchiveDir())
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e.cmdDelete(p, msg, []string{"1"})
+	e.handleMessage(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx", Content: "no", Platform: "plain"})
+
+	if got, want := strings.Join(agent.deleted, ","), "session-1"; got != want {
+		t.Fatalf("deleted = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(artifactDir); err != nil {
+		t.Fatalf("artifact dir should remain, err=%v", err)
+	}
+}
+
 func TestCmdDelete_NoArgsOnCardPlatformShowsDeleteModeCard(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
@@ -3413,6 +3514,39 @@ func TestDeleteMode_ToggleSelectionReturnsUpdatedCard(t *testing.T) {
 	}
 }
 
+func TestDeleteMode_ConfirmCardShowsArtifactDeleteChoice(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	workDir := t.TempDir()
+	agent := &stubDeleteWorkDirAgent{stubDeleteAgent: stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+	}}}}
+	agent.SetWorkDir(workDir)
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+
+	victim := e.sessions.NewSession("feishu:user2", "victim")
+	victim.SetAgentSessionID("session-2", "stub")
+	victim.SetArchiveDir(victim.ID + "__victim")
+	artifactDir := filepath.Join(workDir, "artifacts", "sessions", victim.GetArchiveDir())
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e.cmdDelete(p, msg, nil)
+	_ = e.handleCardNav("act:/delete-mode toggle session-2", msg.SessionKey)
+	confirmCard := e.handleCardNav("act:/delete-mode confirm", msg.SessionKey)
+	if confirmCard == nil {
+		t.Fatal("expected confirmation card")
+	}
+	if _, ok := findCardAction(confirmCard, "act:/delete-mode submit keep"); !ok {
+		t.Fatal("expected keep-files submit action")
+	}
+	if _, ok := findCardAction(confirmCard, "act:/delete-mode submit delete-files"); !ok {
+		t.Fatal("expected delete-files submit action")
+	}
+}
+
 func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
@@ -3436,7 +3570,7 @@ func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 		t.Fatalf("confirmation text = %q, want selected session names", confirmText)
 	}
 
-	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
+	resultCard := e.handleCardNav("act:/delete-mode submit keep", msg.SessionKey)
 	if resultCard == nil {
 		t.Fatal("expected deleting card after submit")
 	}
@@ -3475,7 +3609,7 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 		{ID: "session-2", Summary: "Two"},
 	}
 
-	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
+	resultCard := e.handleCardNav("act:/delete-mode submit keep", msg.SessionKey)
 	if resultCard == nil {
 		t.Fatal("expected deleting card after submit")
 	}
@@ -3577,7 +3711,7 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 
 	e.cmdDelete(p, msg, nil)
 	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
-	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
+	resultCard := e.handleCardNav("act:/delete-mode submit keep", msg.SessionKey)
 	if resultCard == nil {
 		t.Fatal("expected deleting card")
 	}
@@ -3653,7 +3787,7 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 		t.Fatalf("confirm text = %q, want selected sessions", confirmText)
 	}
 
-	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
+	resultCard := e.handleCardNav("act:/delete-mode submit keep", msg.SessionKey)
 	if resultCard == nil {
 		t.Fatal("expected deleting card after submit")
 	}
@@ -13343,3 +13477,4 @@ func TestBtwAlias_ResolvesToPs(t *testing.T) {
 		t.Fatalf("matchPrefix(\"ps\") = %q, want \"ps\"", id2)
 	}
 }
+
