@@ -265,7 +265,10 @@
     "slashHint": "/ を押して利用可能なコマンドを表示",
     "inputPlaceholder": "メッセージを入力、または / でコマンド...",
     "commands": "コマンド",
-    "defaultSession": "Web セッション"
+    "defaultSession": "Web セッション",
+    "newSessionTitle": "新しいセッション",
+    "newSessionLabel": "セッション名",
+    "newSessionPlaceholder": "例: 経費精算の照合"
   },
   "cmd": {
     "search": "コマンドを検索...",

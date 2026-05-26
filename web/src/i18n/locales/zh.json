@@ -265,7 +265,10 @@
     "slashHint": "按 / 查看可用命令",
     "inputPlaceholder": "输入消息或按 / 使用命令...",
     "commands": "命令",
-    "defaultSession": "Web 会话"
+    "defaultSession": "Web 会话",
+    "newSessionTitle": "新建会话",
+    "newSessionLabel": "会话名称",
+    "newSessionPlaceholder": "例如：报销单据核对"
   },
   "cmd": {
     "search": "搜索命令...",

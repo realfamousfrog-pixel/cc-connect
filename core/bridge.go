@@ -1107,16 +1107,17 @@ func (bs *BridgeServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 			bridgeError(w, http.StatusBadRequest, "session_key is required")
 			return
 		}
+		body.Name = strings.TrimSpace(body.Name)
+		if body.Name == "" {
+			bridgeError(w, http.StatusBadRequest, "name is required")
+			return
+		}
 		ref := bs.resolveEngineForSessionKey(body.SessionKey, body.Project)
 		if ref == nil {
 			bridgeError(w, http.StatusNotFound, "no engine found for session key")
 			return
 		}
-		name := body.Name
-		if name == "" {
-			name = "default"
-		}
-		s := ref.engine.sessions.NewSession(body.SessionKey, name)
+		s := ref.engine.sessions.NewSession(body.SessionKey, body.Name)
 		bridgeJSON(w, http.StatusOK, map[string]any{
 			"id":      s.ID,
 			"name":    s.GetName(),

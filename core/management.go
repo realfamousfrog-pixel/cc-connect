@@ -989,14 +989,15 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 			mgmtError(w, http.StatusBadRequest, "session_key is required")
 			return
 		}
-
-		s := e.sessions.GetOrCreateActive(body.SessionKey)
-		if body.Name != "" {
-			s.SetName(body.Name)
+		body.Name = strings.TrimSpace(body.Name)
+		if body.Name == "" {
+			mgmtError(w, http.StatusBadRequest, "name is required")
+			return
 		}
-		e.sessions.Save()
+		s := e.sessions.NewSession(body.SessionKey, body.Name)
 
 		mgmtJSON(w, http.StatusOK, map[string]any{
+			"id":          s.ID,
 			"session_key": body.SessionKey,
 			"name":        s.GetName(),
 		})

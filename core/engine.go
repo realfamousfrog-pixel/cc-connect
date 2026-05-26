@@ -322,8 +322,8 @@ type interactiveState struct {
 	sideText               string
 	pendingImages          []ImageAttachment
 	pendingFiles           []FileAttachment
-	pendingImagePaths      []string
-	pendingFilePaths       []string
+	awaitingImageNaming    []pendingNamedImage
+	awaitingImagePrompted  bool
 	deleteMode             *deleteModeState
 	modelSwitch            *modelSwitchState
 	pendingProviderAdd     *pendingProviderAddState
@@ -341,6 +341,12 @@ type interactiveState struct {
 	// the next turn (e.g. after an abnormal exit). Defaults to true (safe);
 	// cleared to false only after a clean EventResult.
 	eventsNeedResync bool
+}
+
+type pendingNamedImage struct {
+	MimeType   string
+	Path       string
+	SourceName string
 }
 
 type pendingProviderAddState struct {
@@ -2323,6 +2329,140 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	}
 }
 
+func resolveAttachmentWorkDir(workspaceDir string, state *interactiveState, agent Agent) string {
+	if workspaceDir != "" {
+		return workspaceDir
+	}
+	if state != nil && state.agentSession != nil {
+		if wd, ok := state.agentSession.(interface{ GetWorkDir() string }); ok {
+			if dir := strings.TrimSpace(wd.GetWorkDir()); dir != "" {
+				return dir
+			}
+		}
+	}
+	if agent != nil {
+		if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+			if dir := strings.TrimSpace(wd.GetWorkDir()); dir != "" {
+				return dir
+			}
+		}
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
+}
+
+func (e *Engine) buildPendingImageNamingPrompt(images []pendingNamedImage) string {
+	if len(images) == 0 {
+		return e.i18n.T(MsgAttachmentImageNamePromptSingle)
+	}
+	if len(images) == 1 {
+		source := strings.TrimSpace(images[0].SourceName)
+		if source == "" {
+			source = filepath.Base(images[0].Path)
+		}
+		return e.i18n.Tf(MsgAttachmentImageNamePromptSingle, source)
+	}
+	var sb strings.Builder
+	sb.WriteString(e.i18n.Tf(MsgAttachmentImageNamePromptMulti, len(images)))
+	for i, img := range images {
+		source := strings.TrimSpace(img.SourceName)
+		if source == "" {
+			source = filepath.Base(img.Path)
+		}
+		sb.WriteString(fmt.Sprintf("\n%d. %s", i+1, source))
+	}
+	return sb.String()
+}
+
+func parsePendingImageNames(input string, count int) ([]string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil, fmt.Errorf("empty name")
+	}
+	if count == 1 {
+		return []string{input}, nil
+	}
+	fields := strings.Fields(input)
+	result := make([]string, count)
+	filled := 0
+	for _, field := range fields {
+		idx, value, ok := splitIndexedImageName(field)
+		if !ok {
+			return nil, fmt.Errorf("expected format like 1=invoice 2=receipt")
+		}
+		if idx < 1 || idx > count {
+			return nil, fmt.Errorf("index %d out of range", idx)
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil, fmt.Errorf("image %d name is empty", idx)
+		}
+		if result[idx-1] == "" {
+			filled++
+		}
+		result[idx-1] = value
+	}
+	if filled != count {
+		return nil, fmt.Errorf("need %d names", count)
+	}
+	return result, nil
+}
+
+func splitIndexedImageName(field string) (int, string, bool) {
+	parts := strings.SplitN(field, "=", 2)
+	if len(parts) != 2 {
+		return 0, "", false
+	}
+	idx, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, "", false
+	}
+	return idx, parts[1], true
+}
+
+func finalizePendingNamedImages(pending []pendingNamedImage, names []string) ([]ImageAttachment, error) {
+	if len(pending) != len(names) {
+		return nil, fmt.Errorf("pending image count mismatch")
+	}
+	out := make([]ImageAttachment, 0, len(pending))
+	for i, item := range pending {
+		finalPath, err := renamePendingImage(item.Path, names[i], i+1, item.MimeType)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ImageAttachment{
+			MimeType: item.MimeType,
+			FileName: finalPath,
+		})
+	}
+	return out, nil
+}
+
+func renamePendingImage(oldPath, userName string, index int, mimeType string) (string, error) {
+	dir := filepath.Dir(oldPath)
+	ext := filepath.Ext(oldPath)
+	if ext == "" {
+		ext = imageAttachmentExt(mimeType)
+	}
+	base := sanitizeAttachmentFileName(userName)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	base = strings.Trim(base, " ._")
+	if base == "" {
+		base = "image"
+	}
+	newName := fmt.Sprintf("IMG_%s_%02d%s", base, index, ext)
+	newPath := filepath.Join(dir, newName)
+	if oldPath == newPath {
+		return newPath, nil
+	}
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return "", fmt.Errorf("rename image: %w", err)
+	}
+	return newPath, nil
+}
+
 // ──────────────────────────────────────────────────────────────
 // Voice message handling
 // ──────────────────────────────────────────────────────────────
@@ -2683,60 +2823,83 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
-	var stagedImages []ImageAttachment
+	var stagedImages []pendingNamedImage
 	var stagedFiles []FileAttachment
-	attachmentWorkDir := workspaceDir
-	if attachmentWorkDir == "" {
-		if wd, ok := state.agentSession.(interface{ GetWorkDir() string }); ok {
-			attachmentWorkDir = wd.GetWorkDir()
-		}
-	}
-	if attachmentWorkDir == "" {
-		if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
-			attachmentWorkDir = wd.GetWorkDir()
-		}
-	}
-	if attachmentWorkDir == "" {
-		if wd, err := os.Getwd(); err == nil {
-			attachmentWorkDir = wd
-		}
-	}
+	attachmentWorkDir := resolveAttachmentWorkDir(workspaceDir, state, agent)
+	sessionArchiveDir := sessions.EnsureArchiveDir(session, session.GetName())
+
 	state.mu.Lock()
-	if len(msg.Images) > 0 {
-		imagePaths := SaveImagesToDisk(attachmentWorkDir, msg.Images)
-		for i, path := range imagePaths {
-			stagedImages = append(stagedImages, ImageAttachment{
-				MimeType: msg.Images[i].MimeType,
-				FileName: path,
-			})
-			state.pendingImagePaths = append(state.pendingImagePaths, path)
+	if len(state.awaitingImageNaming) > 0 && strings.TrimSpace(msg.Content) != "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
+		pendingCount := len(state.awaitingImageNaming)
+		names, err := parsePendingImageNames(strings.TrimSpace(msg.Content), pendingCount)
+		if err != nil {
+			prompt := e.buildPendingImageNamingPrompt(state.awaitingImageNaming)
+			state.mu.Unlock()
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAttachmentImageNameInvalid, err) + "\n\n" + prompt)
+			return
 		}
-		state.pendingImages = append(state.pendingImages, stagedImages...)
+		finalized, err := finalizePendingNamedImages(state.awaitingImageNaming, names)
+		if err != nil {
+			state.mu.Unlock()
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+			return
+		}
+		state.pendingImages = append(state.pendingImages, finalized...)
+		state.awaitingImageNaming = nil
+		state.awaitingImagePrompted = false
+		pendingAttachmentCount := len(state.pendingImages) + len(state.pendingFiles)
+		state.mu.Unlock()
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAttachmentStored, pendingAttachmentCount))
+		return
+	}
+	state.mu.Unlock()
+
+	if len(msg.Images) > 0 {
+		imagePaths := SaveImagesToSessionDir(attachmentWorkDir, sessionArchiveDir, msg.Images)
+		for i, path := range imagePaths {
+			stagedImages = append(stagedImages, pendingNamedImage{
+				MimeType:   msg.Images[i].MimeType,
+				Path:       path,
+				SourceName: msg.Images[i].FileName,
+			})
+		}
 	}
 	if len(msg.Files) > 0 {
-		filePaths := SaveFilesToDisk(attachmentWorkDir, msg.Files)
+		filePaths := SaveFilesToSessionDir(attachmentWorkDir, sessionArchiveDir, msg.Files)
 		for i, path := range filePaths {
 			stagedFiles = append(stagedFiles, FileAttachment{
 				MimeType: msg.Files[i].MimeType,
 				FileName: path,
 			})
-			state.pendingFilePaths = append(state.pendingFilePaths, path)
 		}
+	}
+
+	state.mu.Lock()
+	if len(stagedFiles) > 0 {
 		state.pendingFiles = append(state.pendingFiles, stagedFiles...)
+	}
+	if len(stagedImages) > 0 {
+		state.awaitingImageNaming = append(state.awaitingImageNaming, stagedImages...)
+		state.awaitingImagePrompted = true
 	}
 	pendingImages := append([]ImageAttachment(nil), state.pendingImages...)
 	pendingFiles := append([]FileAttachment(nil), state.pendingFiles...)
-	pureAttachment := strings.TrimSpace(msg.Content) == "" && (len(pendingImages) > 0 || len(pendingFiles) > 0)
-	if !pureAttachment && strings.TrimSpace(msg.Content) != "" {
+	awaitingImages := append([]pendingNamedImage(nil), state.awaitingImageNaming...)
+	pendingAttachmentCount := len(pendingImages) + len(pendingFiles) + len(awaitingImages)
+	pureAttachment := strings.TrimSpace(msg.Content) == "" && pendingAttachmentCount > 0
+	if !pureAttachment && strings.TrimSpace(msg.Content) != "" && len(awaitingImages) == 0 {
 		state.pendingImages = nil
 		state.pendingFiles = nil
-		state.pendingImagePaths = nil
-		state.pendingFilePaths = nil
 	}
 	state.mu.Unlock()
 
+	if len(awaitingImages) > 0 {
+		e.reply(p, msg.ReplyCtx, e.buildPendingImageNamingPrompt(awaitingImages))
+		return
+	}
+
 	if pureAttachment {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAttachmentStored))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAttachmentStored, pendingAttachmentCount))
 		return
 	}
 
@@ -5265,6 +5428,12 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 }
 
 func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
+	name := strings.TrimSpace(strings.Join(args, " "))
+	if name == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionUsage))
+		return
+	}
+
 	_, sessions, interactiveKey, err := e.commandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
@@ -5281,16 +5450,8 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	old.ClearHistory()
 	sessions.Save()
 
-	name := ""
-	if len(args) > 0 {
-		name = strings.Join(args, " ")
-	}
 	sessions.NewSession(msg.SessionKey, name)
-	if name != "" {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
-	} else {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
-	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
 }
 
 // applySessionFilter conditionally filters agent sessions based on the
@@ -9739,8 +9900,12 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 	case "/new":
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		_, sessions := e.sessionContextForKey(sessionKey)
+		name := strings.TrimSpace(args)
+		if name == "" {
+			return
+		}
 		e.cleanupInteractiveState(interactiveKey)
-		sessions.NewSession(sessionKey, "")
+		sessions.NewSession(sessionKey, name)
 
 	case "/delete-mode":
 		e.executeDeleteModeAction(sessionKey, args)

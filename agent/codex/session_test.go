@@ -324,6 +324,86 @@ func TestSend_ResumeWithImages_PlacesSessionBeforeImageFlags(t *testing.T) {
 	}
 }
 
+func TestSend_WithPreStagedSessionAttachments_ReusesAbsolutePaths(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	argsFile := filepath.Join(workDir, "args.txt")
+	stdinFile := filepath.Join(workDir, "stdin.txt")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE\"\n" +
+		"cat > \"$CODEX_STDIN_FILE\"\n" +
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-reuse\"}'\n" +
+		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
+	powershellScript := `
+[IO.File]::WriteAllLines($env:CODEX_ARGS_FILE, (fakeCodexArgs))
+[IO.File]::WriteAllText($env:CODEX_STDIN_FILE, [Console]::In.ReadToEnd())
+[Console]::Out.WriteLine('{"type":"thread.started","thread_id":"thread-reuse"}')
+[Console]::Out.WriteLine('{"type":"turn.completed"}')
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
+
+	t.Setenv("CODEX_ARGS_FILE", argsFile)
+	t.Setenv("CODEX_STDIN_FILE", stdinFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	sessionDir := filepath.Join(workDir, "artifacts", "sessions", "s12__expense_check")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	imagePath := filepath.Join(sessionDir, "IMG_expense_01.png")
+	filePath := filepath.Join(sessionDir, "sales-data.xlsx")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o644); err != nil {
+		t.Fatalf("write staged image: %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("sheet"), 0o644); err != nil {
+		t.Fatalf("write staged file: %v", err)
+	}
+
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer cs.Close()
+
+	err = cs.Send("请处理这些附件", []core.ImageAttachment{{
+		MimeType: "image/png",
+		FileName: imagePath,
+	}}, []core.FileAttachment{{
+		MimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		FileName: filePath,
+	}})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	args := waitForArgsFile(t, argsFile)
+	gotImagePath := valueAfter(args, "--image")
+	if gotImagePath != imagePath {
+		t.Fatalf("image path = %q, want reused staged path %q", gotImagePath, imagePath)
+	}
+
+	stdinData, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatalf("read stdin file: %v", err)
+	}
+	stdinText := string(stdinData)
+	if !strings.Contains(stdinText, filePath) {
+		t.Fatalf("stdin prompt = %q, want appended staged file path %q", stdinText, filePath)
+	}
+	incomingImageDir := filepath.Join(workDir, "artifacts", "incoming", "images")
+	if _, err := os.Stat(incomingImageDir); !os.IsNotExist(err) {
+		t.Fatalf("incoming image cache should remain unused, stat err=%v", err)
+	}
+	incomingFileDir := filepath.Join(workDir, "artifacts", "incoming", "files")
+	if _, err := os.Stat(incomingFileDir); !os.IsNotExist(err) {
+		t.Fatalf("incoming file cache should remain unused, stat err=%v", err)
+	}
+}
+
 func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")

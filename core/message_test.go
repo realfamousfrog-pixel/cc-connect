@@ -119,3 +119,103 @@ func TestSaveImagesToDisk_WritesIntoIncomingArtifacts(t *testing.T) {
 		}
 	}
 }
+
+func TestSaveFilesToSessionDir_WritesIntoSessionArtifacts(t *testing.T) {
+	workDir := t.TempDir()
+	sessionDir := "s12__报销单据核对"
+	attachDir := filepath.Join(workDir, "artifacts", "sessions", sessionDir)
+
+	paths := SaveFilesToSessionDir(workDir, sessionDir, []FileAttachment{
+		{FileName: "销售数据.xlsx", Data: []byte("sheet-a")},
+		{FileName: "对账单.xlsx", Data: []byte("sheet-b")},
+	})
+
+	if len(paths) != 2 {
+		t.Fatalf("SaveFilesToSessionDir paths len = %d, want 2", len(paths))
+	}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, attachDir+string(filepath.Separator)) {
+			t.Fatalf("SaveFilesToSessionDir wrote outside session dir: %q", p)
+		}
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected staged file to exist: %v", err)
+		}
+	}
+}
+
+func TestSaveImagesToSessionDir_WritesIntoSessionArtifacts(t *testing.T) {
+	workDir := t.TempDir()
+	sessionDir := "s12__报销单据核对"
+	imageDir := filepath.Join(workDir, "artifacts", "sessions", sessionDir)
+
+	paths := SaveImagesToSessionDir(workDir, sessionDir, []ImageAttachment{
+		{MimeType: "image/png", Data: []byte("png")},
+		{MimeType: "image/jpeg", Data: []byte("jpg")},
+	})
+
+	if len(paths) != 2 {
+		t.Fatalf("SaveImagesToSessionDir paths len = %d, want 2", len(paths))
+	}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, imageDir+string(filepath.Separator)) {
+			t.Fatalf("SaveImagesToSessionDir wrote outside session dir: %q", p)
+		}
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected staged image to exist: %v", err)
+		}
+	}
+}
+
+func TestSaveImagesToDisk_ReusesExistingAbsolutePath(t *testing.T) {
+	workDir := t.TempDir()
+	preStaged := filepath.Join(workDir, "artifacts", "sessions", "s12__报销单据核对", "IMG_报销单_01.png")
+	if err := os.MkdirAll(filepath.Dir(preStaged), 0o755); err != nil {
+		t.Fatalf("mkdir pre-staged dir: %v", err)
+	}
+	if err := os.WriteFile(preStaged, []byte("png"), 0o644); err != nil {
+		t.Fatalf("write pre-staged image: %v", err)
+	}
+
+	paths := SaveImagesToDisk(workDir, []ImageAttachment{{
+		MimeType: "image/png",
+		FileName: preStaged,
+	}})
+
+	if len(paths) != 1 {
+		t.Fatalf("SaveImagesToDisk paths len = %d, want 1", len(paths))
+	}
+	if paths[0] != preStaged {
+		t.Fatalf("SaveImagesToDisk reused path = %q, want %q", paths[0], preStaged)
+	}
+	incomingDir := filepath.Join(workDir, "artifacts", "incoming", "images")
+	if _, err := os.Stat(incomingDir); !os.IsNotExist(err) {
+		t.Fatalf("incoming image dir should not be created when reusing staged path, stat err=%v", err)
+	}
+}
+
+func TestSaveFilesToDisk_ReusesExistingAbsolutePath(t *testing.T) {
+	workDir := t.TempDir()
+	preStaged := filepath.Join(workDir, "artifacts", "sessions", "s12__报销单据核对", "销售数据.xlsx")
+	if err := os.MkdirAll(filepath.Dir(preStaged), 0o755); err != nil {
+		t.Fatalf("mkdir pre-staged dir: %v", err)
+	}
+	if err := os.WriteFile(preStaged, []byte("sheet"), 0o644); err != nil {
+		t.Fatalf("write pre-staged file: %v", err)
+	}
+
+	paths := SaveFilesToDisk(workDir, []FileAttachment{{
+		MimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		FileName: preStaged,
+	}})
+
+	if len(paths) != 1 {
+		t.Fatalf("SaveFilesToDisk paths len = %d, want 1", len(paths))
+	}
+	if paths[0] != preStaged {
+		t.Fatalf("SaveFilesToDisk reused path = %q, want %q", paths[0], preStaged)
+	}
+	incomingDir := filepath.Join(workDir, "artifacts", "incoming", "files")
+	if _, err := os.Stat(incomingDir); !os.IsNotExist(err) {
+		t.Fatalf("incoming file dir should not be created when reusing staged path, stat err=%v", err)
+	}
+}

@@ -31,7 +31,7 @@ Each user gets an independent session with full conversation context. Manage ses
 
 | Command | Description |
 |---------|-------------|
-| `/new [name]` | Start a new session |
+| `/new <name>` | Start a new named session |
 | `/list` | List all agent sessions for this project |
 | `/switch <id>` | Switch to a different session |
 | `/current` | Show current session info |
@@ -47,6 +47,8 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/help` | Show available commands |
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
+
+New sessions must be explicitly named. Use `/new <session name>`, for example `/new expense reconciliation`.
 
 cc-connect rotates to a fresh session automatically after long inactivity:
 
@@ -747,6 +749,15 @@ Notes:
 - The files must exist on the local machine where the agent runs.
 - There must be an active session; otherwise the command fails because cc-connect has no chat context to deliver to.
 - Platform-specific file size and file type limits still apply.
+
+### Incoming attachments from chat apps
+
+Incoming attachments are stored per session under `artifacts/sessions/<session-id>__<session-name>/` inside the workspace.
+
+- Regular files are staged directly into that session folder.
+- Images are saved first, then cc-connect asks the user to name them before they become pending session attachments.
+- If a user sends only attachments without text, cc-connect stores them first and waits for the next text message before asking the agent to process them.
+- cc-connect does not auto-generate a `notes.md` file for these incoming attachments.
 
 ---
 

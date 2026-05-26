@@ -6004,8 +6004,8 @@ func TestProcessInteractiveMessageWith_AttachmentOnlyStoresForNextTurn(t *testin
 		t.Fatalf("attachment-only turn should not send attachments immediately, got images=%d files=%d", len(sentImages), len(sentFiles))
 	}
 	sent := p.getSent()
-	if len(sent) != 1 || !strings.Contains(sent[0], "Attachment received and stored.") {
-		t.Fatalf("reply = %#v, want attachment stored hint", sent)
+	if len(sent) != 1 || !strings.Contains(sent[0], "I received 1 image (a.png).") {
+		t.Fatalf("reply = %#v, want image naming prompt", sent)
 	}
 
 	e.interactiveMu.Lock()
@@ -6015,25 +6015,76 @@ func TestProcessInteractiveMessageWith_AttachmentOnlyStoresForNextTurn(t *testin
 		t.Fatal("expected interactive state to persist pending attachments")
 	}
 	state.mu.Lock()
-	pendingImages := len(state.pendingImages)
+	awaitingImages := len(state.awaitingImageNaming)
 	pendingFiles := len(state.pendingFiles)
-	pendingImagePath := ""
+	awaitingImagePath := ""
 	pendingFilePath := ""
-	if len(state.pendingImages) > 0 {
-		pendingImagePath = state.pendingImages[0].FileName
+	if len(state.awaitingImageNaming) > 0 {
+		awaitingImagePath = state.awaitingImageNaming[0].Path
 	}
 	if len(state.pendingFiles) > 0 {
 		pendingFilePath = state.pendingFiles[0].FileName
 	}
 	state.mu.Unlock()
-	if pendingImages != 1 || pendingFiles != 1 {
-		t.Fatalf("pending attachments = (%d, %d), want (1, 1)", pendingImages, pendingFiles)
+	if awaitingImages != 1 || pendingFiles != 1 {
+		t.Fatalf("pending attachments = (%d, %d), want awaiting image=1 pending file=1", awaitingImages, pendingFiles)
 	}
-	if !strings.Contains(pendingImagePath, filepath.Join("artifacts", "incoming", "images")) {
-		t.Fatalf("pending image path = %q, want incoming image artifact path", pendingImagePath)
+	archiveDir := session.GetArchiveDir()
+	if archiveDir == "" {
+		t.Fatal("expected session archive dir to be assigned")
 	}
-	if !strings.Contains(pendingFilePath, filepath.Join("artifacts", "incoming", "files")) {
-		t.Fatalf("pending file path = %q, want incoming file artifact path", pendingFilePath)
+	wantDir := filepath.Join("artifacts", "sessions", archiveDir)
+	if !strings.Contains(awaitingImagePath, wantDir) {
+		t.Fatalf("awaiting image path = %q, want session artifact path containing %q", awaitingImagePath, wantDir)
+	}
+	if !strings.Contains(pendingFilePath, wantDir) {
+		t.Fatalf("pending file path = %q, want session artifact path containing %q", pendingFilePath, wantDir)
+	}
+}
+
+func TestProcessInteractiveMessageWith_AttachmentOnlyAccumulatesStoredCount(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	sess := newControllableSession("pending-attachment-count")
+	sess.workDir = t.TempDir()
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user-attachment-count"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+
+	if !session.TryLock() {
+		t.Fatal("expected initial session lock")
+	}
+	e.processInteractiveMessageWith(p, &Message{
+		SessionKey: sessionKey,
+		ReplyCtx:   "ctx-1",
+		Images: []ImageAttachment{
+			{MimeType: "image/png", Data: []byte("png-a"), FileName: "a.png"},
+			{MimeType: "image/png", Data: []byte("png-b"), FileName: "b.png"},
+		},
+	}, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+
+	firstReply := p.getSent()
+	if len(firstReply) != 1 || !strings.Contains(firstReply[0], "I received 2 images.") {
+		t.Fatalf("first reply = %#v, want multi-image naming prompt", firstReply)
+	}
+	if !strings.Contains(firstReply[0], "1. a.png") || !strings.Contains(firstReply[0], "2. b.png") {
+		t.Fatalf("first reply = %q, want indexed source image list", firstReply[0])
+	}
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		t.Fatal("expected interactive state for image naming flow")
+	}
+	state.mu.Lock()
+	awaiting := append([]pendingNamedImage(nil), state.awaitingImageNaming...)
+	state.mu.Unlock()
+	if len(awaiting) != 2 {
+		t.Fatalf("awaiting images = %d, want 2", len(awaiting))
+	}
+	if !strings.Contains(filepath.Base(awaiting[0].Path), ".png") || !strings.Contains(filepath.Base(awaiting[1].Path), ".png") {
+		t.Fatalf("awaiting image paths = %#v, want png files", awaiting)
 	}
 }
 
@@ -6059,6 +6110,10 @@ func TestProcessInteractiveMessageWith_NextTextConsumesPendingAttachments(t *tes
 		Images:     []ImageAttachment{{MimeType: "image/png", Data: []byte("png"), FileName: "img.png"}},
 		Files:      []FileAttachment{{MimeType: "application/pdf", Data: []byte("pdf"), FileName: "doc.pdf"}},
 	}, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+	firstReply := p.getSent()
+	if len(firstReply) != 1 || !strings.Contains(firstReply[0], "I received 1 image (img.png).") {
+		t.Fatalf("first reply = %#v, want single-image naming prompt", firstReply)
+	}
 
 	if !session.TryLock() {
 		t.Fatal("expected lock to be released after attachment-only turn")
@@ -6067,6 +6122,20 @@ func TestProcessInteractiveMessageWith_NextTextConsumesPendingAttachments(t *tes
 	e.processInteractiveMessageWith(p, &Message{
 		SessionKey: sessionKey,
 		ReplyCtx:   "ctx-2",
+		Content:    "报销单",
+	}, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+	secondReply := p.getSent()
+	if len(secondReply) != 1 || !strings.Contains(secondReply[0], "Received and stored 2 attachment(s).") {
+		t.Fatalf("second reply = %#v, want stored attachment count after naming", secondReply)
+	}
+
+	if !session.TryLock() {
+		t.Fatal("expected lock to be released after naming turn")
+	}
+	p.clearSent()
+	e.processInteractiveMessageWith(p, &Message{
+		SessionKey: sessionKey,
+		ReplyCtx:   "ctx-3",
 		Content:    "帮我总结这个附件",
 	}, session, e.agent, e.sessions, sessionKey, "", sessionKey)
 
@@ -6083,6 +6152,9 @@ func TestProcessInteractiveMessageWith_NextTextConsumesPendingAttachments(t *tes
 	if !filepath.IsAbs(sentImages[0].FileName) || !filepath.IsAbs(sentFiles[0].FileName) {
 		t.Fatalf("expected follow-up attachments to use staged absolute paths, got image=%q file=%q", sentImages[0].FileName, sentFiles[0].FileName)
 	}
+	if base := filepath.Base(sentImages[0].FileName); !strings.Contains(base, "报销单") {
+		t.Fatalf("named image path = %q, want renamed file containing user-provided name", base)
+	}
 
 	e.interactiveMu.Lock()
 	state := e.interactiveStates[sessionKey]
@@ -6096,6 +6168,21 @@ func TestProcessInteractiveMessageWith_NextTextConsumesPendingAttachments(t *tes
 	state.mu.Unlock()
 	if remainingImages != 0 || remainingFiles != 0 {
 		t.Fatalf("pending attachments after send = (%d, %d), want (0, 0)", remainingImages, remainingFiles)
+	}
+}
+
+func TestCmdNew_RequiresSessionName(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	e.cmdNew(p, &Message{
+		SessionKey: "test:user1",
+		ReplyCtx:   "ctx",
+	}, nil)
+
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "Usage: `/new <session name>`") {
+		t.Fatalf("reply = %#v, want new-session usage hint", sent)
 	}
 }
 

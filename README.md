@@ -387,7 +387,7 @@ cc-connect update --pre     # Include pre-releases
 ### 💬 Session Management
 
 ```
-/new [name]       Start a new session
+/new <name>       Start a new named session
 /list             List all sessions
 /switch <id>      Switch session
 /current          Show current session
@@ -524,8 +524,11 @@ Notes:
 - `attachment_send = "off"` disables only attachment send-back; ordinary text replies still work.
 - This command is for generated attachments, not ordinary text replies.
 
-Incoming attachments from chat apps are stored under `artifacts/incoming/images/` and `artifacts/incoming/files/` inside the workspace.
+Incoming attachments from chat apps are stored per session under `artifacts/sessions/<session-id>__<session-name>/` inside the workspace.
+Regular files are staged directly into that session folder. Images are saved first, then cc-connect asks the user to name them before they become pending attachments for the session.
 If the user sends only an attachment without text, cc-connect stores it first and waits for the next text message before asking the agent to process it.
+cc-connect does not auto-generate a `notes.md` file for incoming attachments.
+New sessions must be explicitly named with `/new <session name>`, for example `/new expense reconciliation`.
 
 📖 **Full documentation:** [docs/usage.md](docs/usage.md)
 

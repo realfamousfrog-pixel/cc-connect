@@ -7,6 +7,7 @@ import {
   Slash, ChevronDown,
 } from 'lucide-react';
 import { Badge, Button } from '@/components/ui';
+import { Input, Modal } from '@/components/ui';
 import { listSessions, getSession, type Session, type SessionDetail } from '@/api/sessions';
 import {
   useBridgeSocket, fetchBridgeConfig,
@@ -307,6 +308,8 @@ export default function ChatView() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [cmdResult, setCmdResult] = useState<CommandResult | null>(null);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [newSessionName, setNewSessionName] = useState('');
 
   const messagesEnd = useRef<HTMLDivElement>(null);
   const previewHandleCounter = useRef(0);
@@ -559,11 +562,20 @@ export default function ChatView() {
 
   const handleNewSession = useCallback(() => {
     if (bridgeStatus !== 'connected') return;
-    setUserPickedSession(false);
-    setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content: '/new' }]);
-    bridgeSend('/new');
     setDrawerOpen(false);
+    setNewSessionName('');
+    setNewSessionOpen(true);
   }, [bridgeStatus, bridgeSend]);
+
+  const handleConfirmNewSession = useCallback(() => {
+    const name = newSessionName.trim();
+    if (!name || bridgeStatus !== 'connected') return;
+    setUserPickedSession(false);
+    setMessages(prev => [...prev, { id: `user-${Date.now()}`, role: 'user', content: `/new ${name}` }]);
+    bridgeSend(`/new ${name}`);
+    setNewSessionOpen(false);
+    setNewSessionName('');
+  }, [bridgeStatus, bridgeSend, newSessionName]);
 
   const canSend = bridgeStatus === 'connected';
 
@@ -757,6 +769,36 @@ export default function ChatView() {
         onClose={() => setCmdResult(null)}
         onCardAction={handleCardAction}
       />
+
+      <Modal
+        open={newSessionOpen}
+        onClose={() => setNewSessionOpen(false)}
+        title={t('chat.newSessionTitle')}
+      >
+        <div className="space-y-4">
+          <Input
+            label={t('chat.newSessionLabel')}
+            value={newSessionName}
+            onChange={(e) => setNewSessionName(e.target.value)}
+            placeholder={t('chat.newSessionPlaceholder')}
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleConfirmNewSession();
+              }
+            }}
+          />
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setNewSessionOpen(false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button onClick={handleConfirmNewSession} disabled={!newSessionName.trim()}>
+              {t('common.confirm')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

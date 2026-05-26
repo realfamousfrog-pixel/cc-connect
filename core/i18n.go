@@ -185,6 +185,9 @@ const (
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
 	MsgAttachmentStored          MsgKey = "attachment_stored"
+	MsgAttachmentImageNamePromptSingle MsgKey = "attachment_image_name_prompt_single"
+	MsgAttachmentImageNamePromptMulti  MsgKey = "attachment_image_name_prompt_multi"
+	MsgAttachmentImageNameInvalid      MsgKey = "attachment_image_name_invalid"
 	MsgPermissionPrompt          MsgKey = "permission_prompt"
 	MsgPermissionAllowed         MsgKey = "permission_allowed"
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
@@ -453,6 +456,7 @@ const (
 
 	MsgNewSessionCreated      MsgKey = "new_session_created"
 	MsgNewSessionCreatedName  MsgKey = "new_session_created_name"
+	MsgNewSessionUsage        MsgKey = "new_session_usage"
 	MsgSessionAutoResetIdle   MsgKey = "session_auto_reset_idle"
 	MsgSessionClosingGraceful MsgKey = "session_closing_graceful"
 
@@ -801,11 +805,32 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "(respuesta vacía)",
 	},
 	MsgAttachmentStored: {
-		LangEnglish:            "Attachment received and stored.\nSend your next message with instructions for how I should handle it.",
-		LangChinese:            "附件已收到并存放。\n请下一条消息再告诉我要如何处理它。",
-		LangTraditionalChinese: "附件已收到並存放。\n請下一條訊息再告訴我要如何處理它。",
-		LangJapanese:           "添付ファイルを受け取り保存しました。\n次のメッセージで処理方法を教えてください。",
-		LangSpanish:            "Adjunto recibido y guardado.\nEn tu siguiente mensaje indícame cómo quieres que lo procese.",
+		LangEnglish:            "Received and stored %d attachment(s).\nSend your next message with instructions for how I should handle them.",
+		LangChinese:            "已接收并存放 %d 个附件。\n请下一条消息再告诉我要如何处理它们。",
+		LangTraditionalChinese: "已接收並存放 %d 個附件。\n請下一條訊息再告訴我要如何處理它們。",
+		LangJapanese:           "%d 件の添付ファイルを受け取り保存しました。\n次のメッセージで処理方法を教えてください。",
+		LangSpanish:            "Se recibieron y guardaron %d adjunto(s).\nEn tu siguiente mensaje indícame cómo quieres que los procese.",
+	},
+	MsgAttachmentImageNamePromptSingle: {
+		LangEnglish:            "I received 1 image (%s).\nReply with the name you want me to use for it before continuing.",
+		LangChinese:            "我收到了 1 张图片（%s）。\n请先回复你希望使用的图片名称，再继续后续处理。",
+		LangTraditionalChinese: "我收到了 1 張圖片（%s）。\n請先回覆你希望使用的圖片名稱，再繼續後續處理。",
+		LangJapanese:           "画像を 1 枚受け取りました（%s）。\n続ける前に、この画像の名前を返信してください。",
+		LangSpanish:            "Recibí 1 imagen (%s).\nResponde primero con el nombre que quieres usar para continuar.",
+	},
+	MsgAttachmentImageNamePromptMulti: {
+		LangEnglish:            "I received %d images.\nReply with names in the format `1=name 2=name` before continuing:",
+		LangChinese:            "我收到了 %d 张图片。\n请先按 `1=名称 2=名称` 的格式回复图片名称，再继续后续处理：",
+		LangTraditionalChinese: "我收到了 %d 張圖片。\n請先按 `1=名稱 2=名稱` 的格式回覆圖片名稱，再繼續後續處理：",
+		LangJapanese:           "画像を %d 枚受け取りました。\n続ける前に `1=name 2=name` の形式で名前を返信してください：",
+		LangSpanish:            "Recibí %d imágenes.\nAntes de continuar, responde con nombres en formato `1=nombre 2=nombre`:",
+	},
+	MsgAttachmentImageNameInvalid: {
+		LangEnglish:            "Image naming format is invalid: %v",
+		LangChinese:            "图片命名格式不正确：%v",
+		LangTraditionalChinese: "圖片命名格式不正確：%v",
+		LangJapanese:           "画像の命名形式が正しくありません：%v",
+		LangSpanish:            "El formato para nombrar imágenes no es válido: %v",
 	},
 	MsgPermissionPrompt: {
 		LangEnglish:            "⚠️ **Permission Request**\n\nAgent wants to use **%s**:\n\n```\n%s\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).",
@@ -2923,6 +2948,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 新會話已建立：**%s**",
 		LangJapanese:           "✅ 新しいセッションを作成しました：**%s**",
 		LangSpanish:            "✅ Nueva sesión creada: **%s**",
+	},
+	MsgNewSessionUsage: {
+		LangEnglish:            "Usage: `/new <session name>`",
+		LangChinese:            "用法：`/new <会话名称>`",
+		LangTraditionalChinese: "用法：`/new <會話名稱>`",
+		LangJapanese:           "使い方：`/new <セッション名>`",
+		LangSpanish:            "Uso: `/new <nombre de sesión>`",
 	},
 	MsgSessionAutoResetIdle: {
 		LangEnglish:            "⏰ Session auto-reset after %d minute(s) of inactivity.",

@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // ContinueSession is a sentinel value for AgentSessionID that tells the agent
@@ -18,6 +20,7 @@ const ContinueSession = "__continue__"
 type Session struct {
 	ID                  string         `json:"id"`
 	Name                string         `json:"name"`
+	ArchiveDir          string         `json:"archive_dir,omitempty"`
 	AgentSessionID      string         `json:"agent_session_id"`
 	AgentType           string         `json:"agent_type,omitempty"`
 	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
@@ -131,6 +134,18 @@ func (s *Session) GetUpdatedAt() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.UpdatedAt
+}
+
+func (s *Session) SetArchiveDir(dir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ArchiveDir = dir
+}
+
+func (s *Session) GetArchiveDir() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ArchiveDir
 }
 
 // SetAgentSessionID atomically sets the agent session ID and agent type.
@@ -343,6 +358,20 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 	return nil, fmt.Errorf("session %q not found", target)
 }
 
+// EnsureArchiveDir returns a stable per-session archive directory name.
+// The name is created lazily and persisted so later session renames do not
+// silently move or split previously stored artifacts.
+func (sm *SessionManager) EnsureArchiveDir(session *Session, preferredName string) string {
+	if session == nil {
+		return ""
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	dir := sm.ensureArchiveDirLocked(session, preferredName)
+	sm.saveLocked()
+	return dir
+}
+
 // SwitchToAgentSession finds or creates an internal session that maps to the
 // given agent session ID. If an existing session already references agentSID,
 // it becomes the active session. Otherwise a new session is created so the
@@ -400,6 +429,13 @@ func (sm *SessionManager) SetSessionName(agentSessionID, name string) {
 		delete(sm.sessionNames, agentSessionID)
 	} else {
 		sm.sessionNames[agentSessionID] = name
+	}
+	for _, s := range sm.sessions {
+		s.mu.Lock()
+		if s.AgentSessionID == agentSessionID {
+			s.Name = name
+		}
+		s.mu.Unlock()
 	}
 	sm.saveLocked()
 }
@@ -589,6 +625,7 @@ func (sm *SessionManager) saveLocked() {
 		snapSessions[id] = &Session{
 			ID:                  s.ID,
 			Name:                s.Name,
+			ArchiveDir:          s.ArchiveDir,
 			AgentSessionID:      agentSID,
 			AgentType:           s.AgentType,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
@@ -637,6 +674,54 @@ func (sm *SessionManager) saveLocked() {
 	if err := AtomicWriteFile(sm.storePath, data, 0o644); err != nil {
 		slog.Error("session: failed to write", "path", sm.storePath, "error", err)
 	}
+}
+
+func (sm *SessionManager) ensureArchiveDirLocked(session *Session, preferredName string) string {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.ArchiveDir != "" {
+		return session.ArchiveDir
+	}
+	name := strings.TrimSpace(preferredName)
+	if name == "" {
+		name = strings.TrimSpace(session.Name)
+	}
+	if name == "" {
+		name = "session"
+	}
+	session.ArchiveDir = fmt.Sprintf("%s__%s", session.ID, sanitizeSessionArchiveName(name))
+	return session.ArchiveDir
+}
+
+func sanitizeSessionArchiveName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "session"
+	}
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range name {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+			lastUnderscore = false
+		case r == '_' || r == '-' || unicode.IsSpace(r):
+			if !lastUnderscore && b.Len() > 0 {
+				b.WriteByte('_')
+				lastUnderscore = true
+			}
+		default:
+			if !lastUnderscore && b.Len() > 0 {
+				b.WriteByte('_')
+				lastUnderscore = true
+			}
+		}
+	}
+	sanitized := strings.Trim(b.String(), "_")
+	if sanitized == "" {
+		return "session"
+	}
+	return sanitized
 }
 
 func (sm *SessionManager) load() {

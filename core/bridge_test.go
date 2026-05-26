@@ -810,6 +810,20 @@ func TestBridge_SessionCreateAndDetail(t *testing.T) {
 	}
 }
 
+func TestBridge_SessionCreate_MissingName(t *testing.T) {
+	_, baseURL := startTestBridgeWithREST(t, "tok")
+
+	r := bridgePost(t, baseURL+"/bridge/sessions", "tok", map[string]string{
+		"session_key": "test:u1:u1",
+	})
+	if r.OK {
+		t.Fatal("expected error for missing name")
+	}
+	if !strings.Contains(r.Error, "name is required") {
+		t.Fatalf("error = %q, want name is required", r.Error)
+	}
+}
+
 func TestBridge_SessionDelete(t *testing.T) {
 	_, baseURL := startTestBridgeWithREST(t, "tok")
 

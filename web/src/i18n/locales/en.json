@@ -265,7 +265,10 @@
     "slashHint": "Press / to see available commands",
     "inputPlaceholder": "Type a message or press / for commands...",
     "commands": "Commands",
-    "defaultSession": "Web Session"
+    "defaultSession": "Web Session",
+    "newSessionTitle": "New Session",
+    "newSessionLabel": "Session Name",
+    "newSessionPlaceholder": "For example: expense reconciliation"
   },
   "cmd": {
     "search": "Search commands...",

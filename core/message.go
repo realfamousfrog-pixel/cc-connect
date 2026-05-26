@@ -90,26 +90,44 @@ func incomingFileDir(workDir string) string {
 	return filepath.Join(incomingAttachmentRoot(workDir), "files")
 }
 
+func sessionAttachmentRoot(workDir, sessionDir string) string {
+	return filepath.Join(workDir, "artifacts", "sessions", sessionDir)
+}
+
 // SaveImagesToDisk saves image attachments to workDir/artifacts/incoming/images/
 // and returns the list of absolute image paths.
 func SaveImagesToDisk(workDir string, images []ImageAttachment) []string {
+	return SaveImagesToDiskInDir(incomingImageDir(workDir), images)
+}
+
+// SaveImagesToSessionDir saves image attachments under
+// workDir/artifacts/sessions/<sessionDir>/ and returns absolute paths.
+func SaveImagesToSessionDir(workDir, sessionDir string, images []ImageAttachment) []string {
+	return SaveImagesToDiskInDir(sessionAttachmentRoot(workDir, sessionDir), images)
+}
+
+// SaveImagesToDiskInDir saves image attachments into the provided directory.
+func SaveImagesToDiskInDir(dir string, images []ImageAttachment) []string {
 	if len(images) == 0 {
 		return nil
 	}
-	imgDir := incomingImageDir(workDir)
-	if err := os.MkdirAll(imgDir, 0o755); err != nil {
-		slog.Warn("SaveImagesToDisk: mkdir failed", "dir", imgDir, "error", err)
-	}
 
 	var paths []string
+	ensuredDir := false
 	for i, img := range images {
 		if existing := existingAttachmentPath(img.FileName, img.Data); existing != "" {
 			paths = append(paths, existing)
 			continue
 		}
+		if !ensuredDir {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				slog.Warn("SaveImagesToDisk: mkdir failed", "dir", dir, "error", err)
+			}
+			ensuredDir = true
+		}
 		ext := imageAttachmentExt(img.MimeType)
 		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
-		fpath := filepath.Join(imgDir, fname)
+		fpath := filepath.Join(dir, fname)
 		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
 			slog.Error("SaveImagesToDisk: write failed", "error", err)
 			continue
@@ -130,25 +148,39 @@ func SaveImagesToDisk(workDir string, images []ImageAttachment) []string {
 // written to workDir/escape.txt — outside the intended attachments
 // directory.
 func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
+	return SaveFilesToDiskInDir(incomingFileDir(workDir), files)
+}
+
+// SaveFilesToSessionDir saves file attachments under
+// workDir/artifacts/sessions/<sessionDir>/ and returns absolute paths.
+func SaveFilesToSessionDir(workDir, sessionDir string, files []FileAttachment) []string {
+	return SaveFilesToDiskInDir(sessionAttachmentRoot(workDir, sessionDir), files)
+}
+
+// SaveFilesToDiskInDir saves file attachments into the provided directory.
+func SaveFilesToDiskInDir(dir string, files []FileAttachment) []string {
 	if len(files) == 0 {
 		return nil
 	}
-	attachDir := incomingFileDir(workDir)
-	if err := os.MkdirAll(attachDir, 0o755); err != nil {
-		slog.Warn("SaveFilesToDisk: mkdir failed", "dir", attachDir, "error", err)
-	}
 
 	var paths []string
+	ensuredDir := false
 	for i, f := range files {
 		if existing := existingAttachmentPath(f.FileName, f.Data); existing != "" {
 			paths = append(paths, existing)
 			continue
 		}
+		if !ensuredDir {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				slog.Warn("SaveFilesToDisk: mkdir failed", "dir", dir, "error", err)
+			}
+			ensuredDir = true
+		}
 		fname := sanitizeAttachmentFileName(f.FileName)
 		if fname == "" {
 			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
 		}
-		fpath := filepath.Join(attachDir, fname)
+		fpath := filepath.Join(dir, fname)
 		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
 			slog.Error("SaveFilesToDisk: write failed", "error", err)
 			continue

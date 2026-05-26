@@ -387,7 +387,7 @@ cc-connect update --pre     # 含预发布版本
 ### 💬 会话管理
 
 ```
-/new [名称]            创建新会话
+/new <名称>            创建具名新会话
 /list                  列出所有会话
 /switch <id>           切换会话
 /current               查看当前会话
@@ -513,8 +513,11 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 - `attachment_send = "off"` 只会关闭附件回传，普通文本回复仍然正常。
 - 这个命令是给“生成后的附件回传”用的，不是给普通文本回复用的。
 
-聊天应用发来的入站附件会存放在工作区内的 `artifacts/incoming/images/` 和 `artifacts/incoming/files/`。
+聊天应用发来的入站附件会按会话存放在工作区内的 `artifacts/sessions/<session-id>__<session-name>/`。
+普通文件会直接入会话目录；图片会先落盘并要求用户命名，命名完成后再作为待处理附件挂到当前会话。
 如果用户只发送附件而不附带文字，cc-connect 会先收件入箱，等待下一条文字消息再交给 agent 处理。
+cc-connect 不会为这些入站附件默认自动生成 `notes.md`。
+新建会话必须显式命名，使用 `/new <会话名称>`，例如 `/new 报销单据核对`。
 
 📖 **完整文档：** [docs/usage.zh-CN.md](docs/usage.zh-CN.md)
 

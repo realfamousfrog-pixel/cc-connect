@@ -321,6 +321,20 @@ func TestMgmt_Sessions(t *testing.T) {
 	if !r.OK {
 		t.Fatalf("create session failed: %s", r.Error)
 	}
+	var created struct {
+		ID         string `json:"id"`
+		SessionKey string `json:"session_key"`
+		Name       string `json:"name"`
+	}
+	if err := json.Unmarshal(r.Data, &created); err != nil {
+		t.Fatalf("unmarshal create session response: %v", err)
+	}
+	if created.ID == "" {
+		t.Fatal("expected create session response to include id")
+	}
+	if created.SessionKey != "user2" || created.Name != "work" {
+		t.Fatalf("unexpected create session response: %#v", created)
+	}
 }
 
 func TestMgmt_SessionDetail(t *testing.T) {
@@ -1620,6 +1634,19 @@ func TestMgmt_SessionCreate_MissingKey(t *testing.T) {
 	})
 	if r.OK {
 		t.Fatal("expected error for missing session_key")
+	}
+}
+
+func TestMgmt_SessionCreate_MissingName(t *testing.T) {
+	_, ts, _ := testManagementServer(t, "tok")
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok", map[string]string{
+		"session_key": "user1",
+	})
+	if r.OK {
+		t.Fatal("expected error for missing name")
+	}
+	if !strings.Contains(r.Error, "name is required") {
+		t.Fatalf("error = %q, want name is required", r.Error)
 	}
 }
 

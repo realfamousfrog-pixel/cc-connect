@@ -265,7 +265,10 @@
     "slashHint": "Presiona / para ver los comandos disponibles",
     "inputPlaceholder": "Escribe un mensaje o presiona / para comandos...",
     "commands": "Comandos",
-    "defaultSession": "Sesión Web"
+    "defaultSession": "Sesión Web",
+    "newSessionTitle": "Nueva sesión",
+    "newSessionLabel": "Nombre de la sesión",
+    "newSessionPlaceholder": "Por ejemplo: conciliación de gastos"
   },
   "cmd": {
     "search": "Buscar comandos...",
