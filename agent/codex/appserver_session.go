@@ -113,6 +113,7 @@ type appServerCreditsSnapshot struct {
 type appServerSession struct {
 	url           string
 	workDir       string
+	scratchDir    string
 	model         string
 	effort        string
 	mode          string
@@ -159,11 +160,12 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, scratchDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
 		workDir:          workDir,
+		scratchDir:       scratchDir,
 		model:            model,
 		effort:           effort,
 		mode:             mode,
@@ -413,7 +415,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	}
 
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(s.workDir, files)
+		filePaths := core.SaveFilesToScratchDir(s.scratchDir, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 
@@ -475,7 +477,7 @@ func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachm
 		return prompt, nil, nil
 	}
 
-	imagePaths := core.SaveImagesToDisk(s.workDir, images)
+	imagePaths := core.SaveImagesToScratchDir(s.scratchDir, images)
 	if len(imagePaths) != len(images) {
 		return "", nil, fmt.Errorf("codex app-server: save image")
 	}

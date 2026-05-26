@@ -121,11 +121,11 @@ func TestSaveImagesToDisk_WritesIntoIncomingArtifacts(t *testing.T) {
 }
 
 func TestSaveFilesToSessionDir_WritesIntoSessionArtifacts(t *testing.T) {
-	workDir := t.TempDir()
+	archiveRoot := filepath.Join(t.TempDir(), "artifacts", "sessions")
 	sessionDir := "s12__报销单据核对"
-	attachDir := filepath.Join(workDir, "artifacts", "sessions", sessionDir)
+	attachDir := filepath.Join(archiveRoot, sessionDir)
 
-	paths := SaveFilesToSessionDir(workDir, sessionDir, []FileAttachment{
+	paths := SaveFilesToSessionDir(archiveRoot, sessionDir, []FileAttachment{
 		{FileName: "销售数据.xlsx", Data: []byte("sheet-a")},
 		{FileName: "对账单.xlsx", Data: []byte("sheet-b")},
 	})
@@ -144,11 +144,11 @@ func TestSaveFilesToSessionDir_WritesIntoSessionArtifacts(t *testing.T) {
 }
 
 func TestSaveImagesToSessionDir_WritesIntoSessionArtifacts(t *testing.T) {
-	workDir := t.TempDir()
+	archiveRoot := filepath.Join(t.TempDir(), "artifacts", "sessions")
 	sessionDir := "s12__报销单据核对"
-	imageDir := filepath.Join(workDir, "artifacts", "sessions", sessionDir)
+	imageDir := filepath.Join(archiveRoot, sessionDir)
 
-	paths := SaveImagesToSessionDir(workDir, sessionDir, []ImageAttachment{
+	paths := SaveImagesToSessionDir(archiveRoot, sessionDir, []ImageAttachment{
 		{MimeType: "image/png", Data: []byte("png")},
 		{MimeType: "image/jpeg", Data: []byte("jpg")},
 	})
@@ -193,6 +193,28 @@ func TestSaveImagesToDisk_ReusesExistingAbsolutePath(t *testing.T) {
 	}
 }
 
+func TestSaveImagesToScratchDir_WritesIntoScratchRoot(t *testing.T) {
+	scratchRoot := filepath.Join(t.TempDir(), "runtime", "attachments", "demo")
+	imageDir := filepath.Join(scratchRoot, "images")
+
+	paths := SaveImagesToScratchDir(scratchRoot, []ImageAttachment{
+		{MimeType: "image/png", Data: []byte("png")},
+		{MimeType: "image/jpeg", Data: []byte("jpg")},
+	})
+
+	if len(paths) != 2 {
+		t.Fatalf("SaveImagesToScratchDir paths len = %d, want 2", len(paths))
+	}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, imageDir+string(filepath.Separator)) {
+			t.Fatalf("SaveImagesToScratchDir wrote outside scratch dir: %q", p)
+		}
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected scratch image to exist: %v", err)
+		}
+	}
+}
+
 func TestSaveFilesToDisk_ReusesExistingAbsolutePath(t *testing.T) {
 	workDir := t.TempDir()
 	preStaged := filepath.Join(workDir, "artifacts", "sessions", "s12__报销单据核对", "销售数据.xlsx")
@@ -217,5 +239,27 @@ func TestSaveFilesToDisk_ReusesExistingAbsolutePath(t *testing.T) {
 	incomingDir := filepath.Join(workDir, "artifacts", "incoming", "files")
 	if _, err := os.Stat(incomingDir); !os.IsNotExist(err) {
 		t.Fatalf("incoming file dir should not be created when reusing staged path, stat err=%v", err)
+	}
+}
+
+func TestSaveFilesToScratchDir_WritesIntoScratchRoot(t *testing.T) {
+	scratchRoot := filepath.Join(t.TempDir(), "runtime", "attachments", "demo")
+	fileDir := filepath.Join(scratchRoot, "files")
+
+	paths := SaveFilesToScratchDir(scratchRoot, []FileAttachment{
+		{FileName: "销售数据.xlsx", Data: []byte("sheet-a")},
+		{FileName: "对账单.xlsx", Data: []byte("sheet-b")},
+	})
+
+	if len(paths) != 2 {
+		t.Fatalf("SaveFilesToScratchDir paths len = %d, want 2", len(paths))
+	}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, fileDir+string(filepath.Separator)) {
+			t.Fatalf("SaveFilesToScratchDir wrote outside scratch dir: %q", p)
+		}
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected scratch file to exist: %v", err)
+		}
 	}
 }

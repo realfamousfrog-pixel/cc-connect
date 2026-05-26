@@ -24,6 +24,7 @@ import (
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
 	workDir       string
+	scratchDir    string
 	model         string
 	effort        string
 	mode          string
@@ -62,11 +63,12 @@ var codexRuntimeConfigTimeout = 1500 * time.Millisecond
 var codexContextUsageRetryDelay = 50 * time.Millisecond
 var codexContextUsageRetryCount = 4
 
-func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string) (*codexSession, error) {
+func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, scratchDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
 		workDir:       workDir,
+		scratchDir:    scratchDir,
 		model:         model,
 		effort:        effort,
 		mode:          mode,
@@ -94,7 +96,7 @@ func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, 
 // Otherwise uses `codex exec <prompt>` to start a new conversation.
 func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(cs.workDir, files)
+		filePaths := core.SaveFilesToScratchDir(cs.scratchDir, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !cs.alive.Load() {
@@ -151,7 +153,7 @@ func (cs *codexSession) stageImages(prompt string, images []core.ImageAttachment
 		return prompt, nil, nil
 	}
 
-	imagePaths := core.SaveImagesToDisk(cs.workDir, images)
+	imagePaths := core.SaveImagesToScratchDir(cs.scratchDir, images)
 	if len(imagePaths) != len(images) {
 		return "", nil, fmt.Errorf("codexSession: save image")
 	}

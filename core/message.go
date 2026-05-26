@@ -79,7 +79,17 @@ type FileAttachment struct {
 }
 
 func incomingAttachmentRoot(workDir string) string {
+	if strings.TrimSpace(workDir) == "" {
+		workDir = "."
+	}
 	return filepath.Join(workDir, "artifacts", "incoming")
+}
+
+func attachmentScratchRoot(rootDir string) string {
+	if strings.TrimSpace(rootDir) == "" {
+		rootDir = "."
+	}
+	return rootDir
 }
 
 func incomingImageDir(workDir string) string {
@@ -90,20 +100,34 @@ func incomingFileDir(workDir string) string {
 	return filepath.Join(incomingAttachmentRoot(workDir), "files")
 }
 
-func sessionAttachmentRoot(workDir, sessionDir string) string {
-	return filepath.Join(workDir, "artifacts", "sessions", sessionDir)
+func scratchImageDir(rootDir string) string {
+	return filepath.Join(attachmentScratchRoot(rootDir), "images")
 }
 
-// SaveImagesToDisk saves image attachments to workDir/artifacts/incoming/images/
-// and returns the list of absolute image paths.
+func scratchFileDir(rootDir string) string {
+	return filepath.Join(attachmentScratchRoot(rootDir), "files")
+}
+
+func sessionAttachmentRoot(rootDir, sessionDir string) string {
+	return filepath.Join(rootDir, sessionDir)
+}
+
+// SaveImagesToDisk saves transient image attachments to a runtime scratch
+// directory and returns the list of absolute image paths.
 func SaveImagesToDisk(workDir string, images []ImageAttachment) []string {
 	return SaveImagesToDiskInDir(incomingImageDir(workDir), images)
 }
 
+// SaveImagesToScratchDir saves transient image attachments under
+// <scratchRoot>/images/ and returns absolute image paths.
+func SaveImagesToScratchDir(scratchRoot string, images []ImageAttachment) []string {
+	return SaveImagesToDiskInDir(scratchImageDir(scratchRoot), images)
+}
+
 // SaveImagesToSessionDir saves image attachments under
-// workDir/artifacts/sessions/<sessionDir>/ and returns absolute paths.
-func SaveImagesToSessionDir(workDir, sessionDir string, images []ImageAttachment) []string {
-	return SaveImagesToDiskInDir(sessionAttachmentRoot(workDir, sessionDir), images)
+// <archiveRoot>/<sessionDir>/ and returns absolute paths.
+func SaveImagesToSessionDir(archiveRoot, sessionDir string, images []ImageAttachment) []string {
+	return SaveImagesToDiskInDir(sessionAttachmentRoot(archiveRoot, sessionDir), images)
 }
 
 // SaveImagesToDiskInDir saves image attachments into the provided directory.
@@ -138,8 +162,8 @@ func SaveImagesToDiskInDir(dir string, images []ImageAttachment) []string {
 	return paths
 }
 
-// SaveFilesToDisk saves file attachments to workDir/artifacts/incoming/files/
-// and returns the list of absolute file paths. Agents can reference these paths
+// SaveFilesToDisk saves transient file attachments to a runtime scratch
+// directory and returns the list of absolute file paths. Agents can reference these paths
 // in their prompts so the CLI can read them with built-in tools.
 //
 // The attachment FileName is treated as untrusted user input (it comes from
@@ -151,10 +175,16 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 	return SaveFilesToDiskInDir(incomingFileDir(workDir), files)
 }
 
+// SaveFilesToScratchDir saves transient file attachments under
+// <scratchRoot>/files/ and returns absolute file paths.
+func SaveFilesToScratchDir(scratchRoot string, files []FileAttachment) []string {
+	return SaveFilesToDiskInDir(scratchFileDir(scratchRoot), files)
+}
+
 // SaveFilesToSessionDir saves file attachments under
-// workDir/artifacts/sessions/<sessionDir>/ and returns absolute paths.
-func SaveFilesToSessionDir(workDir, sessionDir string, files []FileAttachment) []string {
-	return SaveFilesToDiskInDir(sessionAttachmentRoot(workDir, sessionDir), files)
+// <archiveRoot>/<sessionDir>/ and returns absolute paths.
+func SaveFilesToSessionDir(archiveRoot, sessionDir string, files []FileAttachment) []string {
+	return SaveFilesToDiskInDir(sessionAttachmentRoot(archiveRoot, sessionDir), files)
 }
 
 // SaveFilesToDiskInDir saves file attachments into the provided directory.

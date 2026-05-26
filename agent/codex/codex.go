@@ -29,6 +29,7 @@ func init() {
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
 	workDir         string
+	scratchDir      string
 	model           string
 	reasoningEffort string
 	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
@@ -47,6 +48,14 @@ func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
 		workDir = "."
+	}
+	scratchDir, _ := opts["cc_attachment_scratch_dir"].(string)
+	if strings.TrimSpace(scratchDir) == "" {
+		if ccDataDir, _ := opts["cc_data_dir"].(string); strings.TrimSpace(ccDataDir) != "" {
+			scratchDir = filepath.Join(ccDataDir, "runtime", "attachments")
+		} else {
+			scratchDir = workDir
+		}
 	}
 	model, _ := opts["model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
@@ -80,6 +89,7 @@ func New(opts map[string]any) (core.Agent, error) {
 
 	return &Agent{
 		workDir:         workDir,
+		scratchDir:      scratchDir,
 		model:           model,
 		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
 		mode:            mode,
@@ -340,6 +350,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	cliBin := a.cliBin
 	cliExtraArgs := a.cliExtraArgs
 	workDir := a.workDir
+	scratchDir := a.scratchDir
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	var baseURL string
@@ -362,13 +373,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, workDir, scratchDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
+	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, scratchDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -432,6 +443,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome
+	}
+	if a.scratchDir != "" {
+		opts["cc_attachment_scratch_dir"] = a.scratchDir
 	}
 	return opts
 }

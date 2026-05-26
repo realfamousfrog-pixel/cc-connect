@@ -286,6 +286,7 @@ func main() {
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
+		engine.SetSessionArchiveDir(proj.SessionArchiveDir)
 		engine.SetDataDir(cfg.DataDir)
 
 		// Wire multi-workspace mode
@@ -1636,6 +1637,12 @@ func buildAgentOptions(dataDir string, proj config.ProjectConfig) map[string]any
 	}
 	opts["cc_data_dir"] = dataDir
 	opts["cc_project"] = proj.Name
+	if proj.SessionArchiveDir != "" {
+		opts["cc_session_archive_dir"] = proj.SessionArchiveDir
+	}
+	if strings.EqualFold(strings.TrimSpace(proj.Agent.Type), "codex") {
+		opts["cc_attachment_scratch_dir"] = filepath.Join(dataDir, "runtime", "attachments", proj.Name)
+	}
 	return opts
 }
 

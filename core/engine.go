@@ -228,6 +228,7 @@ type Engine struct {
 	dirHistory        *DirHistory
 	baseWorkDir       string
 	projectState      *ProjectStateStore
+	sessionArchiveDir string
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -987,6 +988,10 @@ func (e *Engine) SetBaseWorkDir(dir string) {
 
 func (e *Engine) SetProjectStateStore(store *ProjectStateStore) {
 	e.projectState = store
+}
+
+func (e *Engine) SetSessionArchiveDir(dir string) {
+	e.sessionArchiveDir = strings.TrimSpace(dir)
 }
 
 func (e *Engine) SetDataDir(dir string) {
@@ -2135,7 +2140,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
-		if e.queueMessageForBusySession(p, msg, interactiveKey) {
+		if e.queueMessageForBusySessionWithContext(p, msg, interactiveKey, session, sessions, agent, resolvedWorkspace) {
 			// Race guard: the drain loop in processInteractiveMessageWith may
 			// have just finished (session unlocked) between our TryLock failure
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
@@ -2223,6 +2228,11 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 // the event loop sends it after the current turn's EventResult is received.
 // Returns true if the message was successfully queued, false otherwise.
 func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiveKey string) bool {
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	return e.queueMessageForBusySessionWithContext(p, msg, interactiveKey, session, e.sessions, e.agent, "")
+}
+
+func (e *Engine) queueMessageForBusySessionWithContext(p Platform, msg *Message, interactiveKey string, session *Session, sessions *SessionManager, agent Agent, workspaceDir string) bool {
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
@@ -2234,6 +2244,9 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	// issue #565). Only reject if the session was established and died.
 	if state.agentSession != nil && !state.agentSession.Alive() {
 		return false
+	}
+	if e.handleBusySessionAttachmentMessage(p, msg, session, sessions, state, agent, workspaceDir) {
+		return true
 	}
 
 	// Only queue metadata — do NOT send to agent stdin yet.
@@ -2271,6 +2284,95 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"queue_depth", queueDepth,
 	)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	return true
+}
+
+// handleBusySessionAttachmentMessage applies the local attachment staging /
+// image-naming state machine even when a session is still locked by a
+// previous turn. Without this, rapid follow-up attachment messages can be
+// queued and later sent straight to the agent, bypassing naming/staging.
+func (e *Engine) handleBusySessionAttachmentMessage(p Platform, msg *Message, session *Session, sessions *SessionManager, state *interactiveState, agent Agent, workspaceDir string) bool {
+	if state == nil || session == nil || sessions == nil {
+		return false
+	}
+
+	trimmedContent := strings.TrimSpace(msg.Content)
+
+	state.mu.Lock()
+	hasAwaitingImages := len(state.awaitingImageNaming) > 0
+	if hasAwaitingImages && trimmedContent != "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
+		pendingCount := len(state.awaitingImageNaming)
+		names, err := parsePendingImageNames(trimmedContent, pendingCount)
+		if err != nil {
+			prompt := e.buildPendingImageNamingPrompt(state.awaitingImageNaming)
+			state.mu.Unlock()
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAttachmentImageNameInvalid, err)+"\n\n"+prompt)
+			return true
+		}
+		finalized, err := finalizePendingNamedImages(state.awaitingImageNaming, names)
+		if err != nil {
+			state.mu.Unlock()
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+			return true
+		}
+		state.pendingImages = append(state.pendingImages, finalized...)
+		state.awaitingImageNaming = nil
+		state.awaitingImagePrompted = false
+		pendingAttachmentCount := len(state.pendingImages) + len(state.pendingFiles)
+		state.mu.Unlock()
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAttachmentStored, pendingAttachmentCount))
+		return true
+	}
+	shouldStageLocally := len(msg.Images) > 0 || (len(msg.Files) > 0 && (trimmedContent == "" || hasAwaitingImages))
+	state.mu.Unlock()
+	if !shouldStageLocally {
+		return false
+	}
+
+	attachmentRoot := resolveSessionArchiveRoot(e.sessionArchiveDir, workspaceDir, state, agent)
+	sessionArchiveDir := sessions.EnsureArchiveDir(session, session.GetName())
+
+	var stagedImages []pendingNamedImage
+	if len(msg.Images) > 0 {
+		imagePaths := SaveImagesToSessionDir(attachmentRoot, sessionArchiveDir, msg.Images)
+		for i, path := range imagePaths {
+			stagedImages = append(stagedImages, pendingNamedImage{
+				MimeType:   msg.Images[i].MimeType,
+				Path:       path,
+				SourceName: msg.Images[i].FileName,
+			})
+		}
+	}
+
+	var stagedFiles []FileAttachment
+	if len(msg.Files) > 0 {
+		filePaths := SaveFilesToSessionDir(attachmentRoot, sessionArchiveDir, msg.Files)
+		for i, path := range filePaths {
+			stagedFiles = append(stagedFiles, FileAttachment{
+				MimeType: msg.Files[i].MimeType,
+				FileName: path,
+			})
+		}
+	}
+
+	state.mu.Lock()
+	if len(stagedFiles) > 0 {
+		state.pendingFiles = append(state.pendingFiles, stagedFiles...)
+	}
+	if len(stagedImages) > 0 {
+		state.awaitingImageNaming = append(state.awaitingImageNaming, stagedImages...)
+		state.awaitingImagePrompted = true
+	}
+	awaitingImages := append([]pendingNamedImage(nil), state.awaitingImageNaming...)
+	pendingAttachmentCount := len(state.pendingImages) + len(state.pendingFiles) + len(awaitingImages)
+	state.mu.Unlock()
+
+	if len(awaitingImages) > 0 {
+		e.reply(p, msg.ReplyCtx, e.buildPendingImageNamingPrompt(awaitingImages))
+		return true
+	}
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAttachmentStored, pendingAttachmentCount))
 	return true
 }
 
@@ -2351,6 +2453,14 @@ func resolveAttachmentWorkDir(workspaceDir string, state *interactiveState, agen
 		return wd
 	}
 	return "."
+}
+
+func resolveSessionArchiveRoot(configuredRoot string, workspaceDir string, state *interactiveState, agent Agent) string {
+	if root := strings.TrimSpace(configuredRoot); root != "" {
+		return root
+	}
+	workDir := resolveAttachmentWorkDir(workspaceDir, state, agent)
+	return filepath.Join(workDir, "artifacts", "sessions")
 }
 
 func (e *Engine) buildPendingImageNamingPrompt(images []pendingNamedImage) string {
@@ -2825,7 +2935,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	var stagedImages []pendingNamedImage
 	var stagedFiles []FileAttachment
-	attachmentWorkDir := resolveAttachmentWorkDir(workspaceDir, state, agent)
+	attachmentRoot := resolveSessionArchiveRoot(e.sessionArchiveDir, workspaceDir, state, agent)
 	sessionArchiveDir := sessions.EnsureArchiveDir(session, session.GetName())
 
 	state.mu.Lock()
@@ -2855,7 +2965,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.mu.Unlock()
 
 	if len(msg.Images) > 0 {
-		imagePaths := SaveImagesToSessionDir(attachmentWorkDir, sessionArchiveDir, msg.Images)
+		imagePaths := SaveImagesToSessionDir(attachmentRoot, sessionArchiveDir, msg.Images)
 		for i, path := range imagePaths {
 			stagedImages = append(stagedImages, pendingNamedImage{
 				MimeType:   msg.Images[i].MimeType,
@@ -2865,7 +2975,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}
 	}
 	if len(msg.Files) > 0 {
-		filePaths := SaveFilesToSessionDir(attachmentWorkDir, sessionArchiveDir, msg.Files)
+		filePaths := SaveFilesToSessionDir(attachmentRoot, sessionArchiveDir, msg.Files)
 		for i, path := range filePaths {
 			stagedFiles = append(stagedFiles, FileAttachment{
 				MimeType: msg.Files[i].MimeType,

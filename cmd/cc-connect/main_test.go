@@ -165,11 +165,13 @@ func TestBuildAgentOptionsInjectsProjectScope(t *testing.T) {
 	proj := config.ProjectConfig{
 		Name: "demo-project",
 		Agent: config.AgentConfig{
+			Type: "codex",
 			Options: map[string]any{
 				"work_dir": "/tmp/work",
 				"model":    "gpt-test",
 			},
 		},
+		SessionArchiveDir: "/tmp/sessions",
 	}
 
 	got := buildAgentOptions("/tmp/data", proj)
@@ -180,11 +182,40 @@ func TestBuildAgentOptionsInjectsProjectScope(t *testing.T) {
 	if got["cc_project"] != "demo-project" {
 		t.Fatalf("cc_project = %v, want %q", got["cc_project"], "demo-project")
 	}
+	if got["cc_session_archive_dir"] != "/tmp/sessions" {
+		t.Fatalf("cc_session_archive_dir = %v, want %q", got["cc_session_archive_dir"], "/tmp/sessions")
+	}
+	wantScratchDir := filepath.Join("/tmp/data", "runtime", "attachments", "demo-project")
+	if got["cc_attachment_scratch_dir"] != wantScratchDir {
+		t.Fatalf("cc_attachment_scratch_dir = %v, want %q", got["cc_attachment_scratch_dir"], wantScratchDir)
+	}
 	if got["work_dir"] != "/tmp/work" || got["model"] != "gpt-test" {
 		t.Fatalf("buildAgentOptions() lost existing options: %v", got)
 	}
 	if _, exists := proj.Agent.Options["cc_data_dir"]; exists {
 		t.Fatalf("project agent options mutated: %v", proj.Agent.Options)
+	}
+}
+
+func TestBuildAgentOptions_NonCodexDoesNotInjectScratchDir(t *testing.T) {
+	proj := config.ProjectConfig{
+		Name: "demo-project",
+		Agent: config.AgentConfig{
+			Type: "cursor",
+			Options: map[string]any{
+				"work_dir": "/tmp/work",
+			},
+		},
+		SessionArchiveDir: "/tmp/sessions",
+	}
+
+	got := buildAgentOptions("/tmp/data", proj)
+
+	if _, exists := got["cc_attachment_scratch_dir"]; exists {
+		t.Fatalf("non-codex options should not include scratch dir: %v", got)
+	}
+	if got["cc_session_archive_dir"] != "/tmp/sessions" {
+		t.Fatalf("cc_session_archive_dir = %v, want %q", got["cc_session_archive_dir"], "/tmp/sessions")
 	}
 }
 

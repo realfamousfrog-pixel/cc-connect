@@ -332,6 +332,10 @@ type ProjectConfig struct {
 	Name    string `toml:"name"`
 	Mode    string `toml:"mode,omitempty"`     // "" or "multi-workspace"
 	BaseDir string `toml:"base_dir,omitempty"` // parent dir for workspaces
+	// SessionArchiveDir stores inbound chat attachments per session outside the
+	// agent work_dir. When empty, defaults to <work_dir>/artifacts/sessions for
+	// backward compatibility.
+	SessionArchiveDir string `toml:"session_archive_dir,omitempty"`
 	SkipGit *bool  `toml:"skip_git,omitempty"`
 	// WorkspaceInitAllowLocalPaths allows /workspace init and the conversational
 	// init flow to bind existing local directories. Default false keeps init

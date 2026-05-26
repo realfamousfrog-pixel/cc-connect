@@ -144,6 +144,39 @@ func TestIntegration_Codex_ProviderSwitch_EnvVars(t *testing.T) {
 	}
 }
 
+func TestNew_DefaultScratchDirUsesDataRuntimeAttachments(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	agentAny, err := New(map[string]any{
+		"work_dir":    filepath.Join(t.TempDir(), "cc-bot"),
+		"cc_data_dir": dataDir,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	a, ok := agentAny.(*Agent)
+	if !ok {
+		t.Fatalf("agent type = %T, want *Agent", agentAny)
+	}
+	want := filepath.Join(dataDir, "runtime", "attachments")
+	if a.scratchDir != want {
+		t.Fatalf("scratchDir = %q, want %q", a.scratchDir, want)
+	}
+}
+
+func TestWorkspaceAgentOptions_ExportsScratchDir(t *testing.T) {
+	a := &Agent{
+		mode:       "suggest",
+		backend:    "exec",
+		scratchDir: "/tmp/runtime/attachments/demo",
+	}
+
+	opts := a.WorkspaceAgentOptions()
+	if opts["cc_attachment_scratch_dir"] != "/tmp/runtime/attachments/demo" {
+		t.Fatalf("cc_attachment_scratch_dir = %v, want %q", opts["cc_attachment_scratch_dir"], "/tmp/runtime/attachments/demo")
+	}
+}
+
 func TestIntegration_Codex_ProviderSwitch_SessionArgs(t *testing.T) {
 	cfg := skipIfNoConfig(t)
 

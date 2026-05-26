@@ -6042,6 +6042,57 @@ func TestProcessInteractiveMessageWith_AttachmentOnlyStoresForNextTurn(t *testin
 	}
 }
 
+func TestProcessInteractiveMessageWith_AttachmentOnlyStoresIntoConfiguredSessionArchiveDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	sess := newControllableSession("pending-attachments-configured-archive")
+	sess.workDir = t.TempDir()
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	archiveRoot := filepath.Join(t.TempDir(), "sessions")
+	e.SetSessionArchiveDir(archiveRoot)
+	sessionKey := "test:user-attachment-only-archive-root"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+
+	e.processInteractiveMessageWith(p, &Message{
+		SessionKey: sessionKey,
+		ReplyCtx:   "ctx-1",
+		Images:     []ImageAttachment{{MimeType: "image/png", Data: []byte("png"), FileName: "a.png"}},
+		Files:      []FileAttachment{{MimeType: "text/plain", Data: []byte("txt"), FileName: "a.txt"}},
+	}, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		t.Fatal("expected interactive state to persist pending attachments")
+	}
+	state.mu.Lock()
+	awaitingImagePath := ""
+	pendingFilePath := ""
+	if len(state.awaitingImageNaming) > 0 {
+		awaitingImagePath = state.awaitingImageNaming[0].Path
+	}
+	if len(state.pendingFiles) > 0 {
+		pendingFilePath = state.pendingFiles[0].FileName
+	}
+	state.mu.Unlock()
+
+	archiveDir := session.GetArchiveDir()
+	if archiveDir == "" {
+		t.Fatal("expected session archive dir to be assigned")
+	}
+	wantDir := filepath.Join(archiveRoot, archiveDir)
+	if !strings.HasPrefix(awaitingImagePath, wantDir+string(filepath.Separator)) {
+		t.Fatalf("awaiting image path = %q, want configured archive root %q", awaitingImagePath, wantDir)
+	}
+	if !strings.HasPrefix(pendingFilePath, wantDir+string(filepath.Separator)) {
+		t.Fatalf("pending file path = %q, want configured archive root %q", pendingFilePath, wantDir)
+	}
+}
+
 func TestProcessInteractiveMessageWith_AttachmentOnlyAccumulatesStoredCount(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	sess := newControllableSession("pending-attachment-count")
@@ -6085,6 +6136,157 @@ func TestProcessInteractiveMessageWith_AttachmentOnlyAccumulatesStoredCount(t *t
 	}
 	if !strings.Contains(filepath.Base(awaiting[0].Path), ".png") || !strings.Contains(filepath.Base(awaiting[1].Path), ".png") {
 		t.Fatalf("awaiting image paths = %#v, want png files", awaiting)
+	}
+}
+
+func TestHandleMessage_BusySession_SecondImageMergesIntoAwaitingNaming(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	sess := newControllableSession("busy-second-image")
+	sess.workDir = t.TempDir()
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user-busy-second-image"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+
+	archiveDir := e.sessions.EnsureArchiveDir(session, session.GetName())
+	firstPath := filepath.Join(sess.workDir, "artifacts", "sessions", archiveDir, "img_existing_0.png")
+	if err := os.MkdirAll(filepath.Dir(firstPath), 0o755); err != nil {
+		t.Fatalf("mkdir staged image dir: %v", err)
+	}
+	if err := os.WriteFile(firstPath, []byte("png-a"), 0o644); err != nil {
+		t.Fatalf("write staged image: %v", err)
+	}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[sessionKey] = &interactiveState{
+		agentSession:        sess,
+		platform:            p,
+		replyCtx:            "ctx-1",
+		eventsNeedResync:    true,
+		awaitingImageNaming: []pendingNamedImage{{MimeType: "image/png", Path: firstPath, SourceName: "a.png"}},
+	}
+	e.interactiveMu.Unlock()
+
+	e.handleMessage(p, &Message{
+		SessionKey: sessionKey,
+		ReplyCtx:   "ctx-2",
+		Images:     []ImageAttachment{{MimeType: "image/png", Data: []byte("png-b"), FileName: "b.png"}},
+	})
+
+	replies := p.getSent()
+	if len(replies) != 1 || !strings.Contains(replies[0], "I received 2 images.") {
+		t.Fatalf("reply = %#v, want merged multi-image naming prompt", replies)
+	}
+	if !strings.Contains(replies[0], "1. a.png") || !strings.Contains(replies[0], "2. b.png") {
+		t.Fatalf("reply = %q, want indexed image list", replies[0])
+	}
+
+	sendCalls, _, sentImages, sentFiles := sess.SendSnapshot()
+	if sendCalls != 0 || len(sentImages) != 0 || len(sentFiles) != 0 {
+		t.Fatalf("busy attachment merge should not send to agent, got sendCalls=%d images=%d files=%d", sendCalls, len(sentImages), len(sentFiles))
+	}
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		t.Fatal("expected interactive state to persist")
+	}
+	state.mu.Lock()
+	awaiting := append([]pendingNamedImage(nil), state.awaitingImageNaming...)
+	queued := len(state.pendingMessages)
+	state.mu.Unlock()
+	if len(awaiting) != 2 {
+		t.Fatalf("awaiting images = %d, want 2", len(awaiting))
+	}
+	if queued != 0 {
+		t.Fatalf("queued messages = %d, want 0", queued)
+	}
+}
+
+func TestHandleMessage_BusySession_ImageNamingReplyHandledLocally(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	sess := newControllableSession("busy-image-naming")
+	sess.workDir = t.TempDir()
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user-busy-image-naming"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+
+	archiveDir := e.sessions.EnsureArchiveDir(session, session.GetName())
+	baseDir := filepath.Join(sess.workDir, "artifacts", "sessions", archiveDir)
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatalf("mkdir staged image dir: %v", err)
+	}
+	firstPath := filepath.Join(baseDir, "img_a_0.png")
+	secondPath := filepath.Join(baseDir, "img_b_1.png")
+	if err := os.WriteFile(firstPath, []byte("png-a"), 0o644); err != nil {
+		t.Fatalf("write first staged image: %v", err)
+	}
+	if err := os.WriteFile(secondPath, []byte("png-b"), 0o644); err != nil {
+		t.Fatalf("write second staged image: %v", err)
+	}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[sessionKey] = &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx-1",
+		eventsNeedResync: true,
+		awaitingImageNaming: []pendingNamedImage{
+			{MimeType: "image/png", Path: firstPath, SourceName: "a.png"},
+			{MimeType: "image/png", Path: secondPath, SourceName: "b.png"},
+		},
+	}
+	e.interactiveMu.Unlock()
+
+	e.handleMessage(p, &Message{
+		SessionKey: sessionKey,
+		ReplyCtx:   "ctx-2",
+		Content:    "1=alpha 2=beta",
+	})
+
+	replies := p.getSent()
+	if len(replies) != 1 || !strings.Contains(replies[0], "Received and stored 2 attachment(s).") {
+		t.Fatalf("reply = %#v, want stored attachment ack", replies)
+	}
+
+	sendCalls, _, sentImages, sentFiles := sess.SendSnapshot()
+	if sendCalls != 0 || len(sentImages) != 0 || len(sentFiles) != 0 {
+		t.Fatalf("busy naming reply should not send to agent, got sendCalls=%d images=%d files=%d", sendCalls, len(sentImages), len(sentFiles))
+	}
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		t.Fatal("expected interactive state to persist")
+	}
+	state.mu.Lock()
+	awaiting := len(state.awaitingImageNaming)
+	pendingImages := append([]ImageAttachment(nil), state.pendingImages...)
+	queued := len(state.pendingMessages)
+	state.mu.Unlock()
+	if awaiting != 0 {
+		t.Fatalf("awaiting images = %d, want 0", awaiting)
+	}
+	if len(pendingImages) != 2 {
+		t.Fatalf("pending images = %d, want 2", len(pendingImages))
+	}
+	if queued != 0 {
+		t.Fatalf("queued messages = %d, want 0", queued)
+	}
+	if !strings.Contains(filepath.Base(pendingImages[0].FileName), "IMG_alpha_01") {
+		t.Fatalf("first renamed image = %q, want IMG_alpha_01...", pendingImages[0].FileName)
+	}
+	if !strings.Contains(filepath.Base(pendingImages[1].FileName), "IMG_beta_02") {
+		t.Fatalf("second renamed image = %q, want IMG_beta_02...", pendingImages[1].FileName)
 	}
 }
 
