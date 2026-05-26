@@ -250,10 +250,7 @@ Unregister-ScheduledTask -TaskName %s -Confirm:$false
 	return nil
 }
 
+// CheckLinger is a no-op on Windows (always returns false).
 func CheckLinger() (enabled bool, user string) {
-	user = os.Getenv("USERNAME")
-	if user == "" {
-		user = "unknown"
-	}
-	return true, user
+	return false, ""
 }
