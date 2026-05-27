@@ -5664,6 +5664,378 @@ func filterOwnedSessions(sessions []AgentSessionInfo, known map[string]struct{})
 
 const listPageSize = 20
 
+type sessionListView struct {
+	SelectionID          string
+	InternalID           string
+	CurrentAgentSessionID string
+	DeleteAgentSessionID string
+	MatchAgentSessionIDs []string
+	DisplayName          string
+	Summary              string
+	MessageCount         int
+	UpdatedAt            time.Time
+	CreatedAt            time.Time
+	Active               bool
+	External             bool
+	LocalSession         *Session
+}
+
+func localSessionSelectionID(id string) string {
+	return "local:" + id
+}
+
+func externalSessionSelectionID(id string) string {
+	return "agent:" + id
+}
+
+func normalizeSessionListText(text string) string {
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.Join(strings.Fields(text), " ")
+	return strings.TrimSpace(text)
+}
+
+func truncateSessionListText(text string, maxRunes int, emptyText string) string {
+	text = normalizeSessionListText(text)
+	if text == "" {
+		return emptyText
+	}
+	if maxRunes > 0 && len([]rune(text)) > maxRunes {
+		return string([]rune(text)[:maxRunes]) + "…"
+	}
+	return text
+}
+
+func isPlaceholderSessionName(name string) bool {
+	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "" || name == "default" || name == "session" {
+		return true
+	}
+	if strings.HasPrefix(name, "session-") {
+		suffix := name[len("session-"):]
+		if suffix == "" {
+			return false
+		}
+		for _, r := range suffix {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	if len(name) >= 2 && name[0] == 's' {
+		for _, r := range name[1:] {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func preferredTrackedSessionName(sessions *SessionManager, localName, currentAgentID string, matchIDs []string) string {
+	if sessions == nil {
+		return ""
+	}
+	currentAgentID = strings.TrimSpace(currentAgentID)
+	if currentAgentID != "" {
+		if name := strings.TrimSpace(sessions.GetSessionName(currentAgentID)); name != "" {
+			return name
+		}
+	}
+	for _, id := range matchIDs {
+		if name := strings.TrimSpace(sessions.GetSessionName(id)); name != "" {
+			return name
+		}
+	}
+	localName = strings.TrimSpace(localName)
+	if isPlaceholderSessionName(localName) {
+		return ""
+	}
+	if currentAgentID == "" {
+		return localName
+	}
+	return ""
+}
+
+func dedupeSessionIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func (v sessionListView) shortID() string {
+	candidates := []string{v.CurrentAgentSessionID, v.DeleteAgentSessionID, v.InternalID}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if len(candidate) > 12 {
+			return candidate[:12]
+		}
+		return candidate
+	}
+	return ""
+}
+
+func (e *Engine) buildSessionListViews(userKey string, sessions *SessionManager, agentSessions []AgentSessionInfo) []sessionListView {
+	activeInternalID := sessions.ActiveSessionID(userKey)
+	agentInfoByID := make(map[string]AgentSessionInfo, len(agentSessions))
+	for _, info := range agentSessions {
+		agentInfoByID[info.ID] = info
+	}
+
+	stored := sessions.ListSessions(userKey)
+	views := make([]sessionListView, 0, len(stored))
+	trackedAgentIDs := make(map[string]struct{})
+
+	for _, session := range stored {
+		if session == nil {
+			continue
+		}
+
+		session.mu.Lock()
+		historyCount := len(session.History)
+		currentAgentID := session.AgentSessionID
+		pastAgentIDs := append([]string(nil), session.PastAgentSessionIDs...)
+		name := strings.TrimSpace(session.Name)
+		createdAt := session.CreatedAt
+		updatedAt := session.UpdatedAt
+		lastHistory := ""
+		if historyCount > 0 {
+			lastHistory = session.History[historyCount-1].Content
+		}
+		session.mu.Unlock()
+
+		if historyCount == 0 && currentAgentID == "" && len(pastAgentIDs) == 0 {
+			continue
+		}
+
+		matchIDs := dedupeSessionIDs(append([]string{currentAgentID}, pastAgentIDs...))
+		for _, id := range matchIDs {
+			trackedAgentIDs[id] = struct{}{}
+		}
+
+		summary := normalizeSessionListText(lastHistory)
+		deleteAgentID := currentAgentID
+		if summary == "" && currentAgentID != "" {
+			summary = normalizeSessionListText(agentInfoByID[currentAgentID].Summary)
+		}
+		if deleteAgentID == "" {
+			for _, id := range matchIDs {
+				if _, ok := agentInfoByID[id]; ok {
+					deleteAgentID = id
+					if summary == "" {
+						summary = normalizeSessionListText(agentInfoByID[id].Summary)
+					}
+					break
+				}
+			}
+		}
+		if deleteAgentID == "" && len(matchIDs) > 0 {
+			deleteAgentID = matchIDs[0]
+		}
+
+		displayName := preferredTrackedSessionName(sessions, name, currentAgentID, matchIDs)
+		if displayName == "" {
+			displayName = summary
+		}
+		if displayName == "" && !isPlaceholderSessionName(name) {
+			displayName = strings.TrimSpace(name)
+		}
+		if displayName == "" && currentAgentID != "" {
+			displayName = normalizeSessionListText(agentInfoByID[currentAgentID].Summary)
+		}
+		displayName = truncateSessionListText(displayName, 40, "(empty)")
+
+		messageCount := historyCount
+		if currentAgentID != "" {
+			if info, ok := agentInfoByID[currentAgentID]; ok && info.MessageCount > 0 {
+				messageCount = info.MessageCount
+			}
+		}
+
+		views = append(views, sessionListView{
+			SelectionID:           localSessionSelectionID(session.ID),
+			InternalID:            session.ID,
+			CurrentAgentSessionID: currentAgentID,
+			DeleteAgentSessionID:  deleteAgentID,
+			MatchAgentSessionIDs:  matchIDs,
+			DisplayName:           displayName,
+			Summary:               summary,
+			MessageCount:          messageCount,
+			UpdatedAt:             updatedAt,
+			CreatedAt:             createdAt,
+			Active:                activeInternalID == session.ID,
+			LocalSession:          session,
+		})
+	}
+
+	sort.SliceStable(views, func(i, j int) bool {
+		if !views[i].UpdatedAt.Equal(views[j].UpdatedAt) {
+			return views[i].UpdatedAt.After(views[j].UpdatedAt)
+		}
+		if !views[i].CreatedAt.Equal(views[j].CreatedAt) {
+			return views[i].CreatedAt.After(views[j].CreatedAt)
+		}
+		return views[i].InternalID < views[j].InternalID
+	})
+
+	if e.filterExternalSessions {
+		return views
+	}
+
+	activeAgentID := ""
+	if activeSession := sessions.FindByID(activeInternalID); activeSession != nil {
+		activeAgentID = activeSession.GetAgentSessionID()
+	}
+	for _, info := range agentSessions {
+		if _, ok := trackedAgentIDs[info.ID]; ok {
+			continue
+		}
+		displayName := truncateSessionListText(info.Summary, 40, e.i18n.T(MsgListEmptySummary))
+		views = append(views, sessionListView{
+			SelectionID:           externalSessionSelectionID(info.ID),
+			CurrentAgentSessionID: info.ID,
+			DeleteAgentSessionID:  info.ID,
+			MatchAgentSessionIDs:  []string{info.ID},
+			DisplayName:           displayName,
+			Summary:               normalizeSessionListText(info.Summary),
+			MessageCount:          info.MessageCount,
+			UpdatedAt:             info.ModifiedAt,
+			CreatedAt:             info.ModifiedAt,
+			Active:                activeAgentID != "" && activeAgentID == info.ID,
+			External:              true,
+		})
+	}
+
+	return views
+}
+
+func (e *Engine) listSessionViews(userKey string, agent Agent, sessions *SessionManager) ([]sessionListView, error) {
+	agentSessions, err := agent.ListSessions(e.ctx)
+	if err != nil {
+		return nil, err
+	}
+	return e.buildSessionListViews(userKey, sessions, agentSessions), nil
+}
+
+func (e *Engine) matchSessionView(views []sessionListView, query string) *sessionListView {
+	if len(views) == 0 {
+		return nil
+	}
+
+	if idx, err := strconv.Atoi(query); err == nil && idx >= 1 && idx <= len(views) {
+		return &views[idx-1]
+	}
+
+	queryLower := strings.ToLower(query)
+
+	for i := range views {
+		if views[i].DisplayName != "" && strings.ToLower(views[i].DisplayName) == queryLower {
+			return &views[i]
+		}
+	}
+
+	for i := range views {
+		if views[i].InternalID != "" && strings.HasPrefix(strings.ToLower(views[i].InternalID), queryLower) {
+			return &views[i]
+		}
+		for _, id := range views[i].MatchAgentSessionIDs {
+			if strings.HasPrefix(strings.ToLower(id), queryLower) {
+				return &views[i]
+			}
+		}
+	}
+
+	for i := range views {
+		if views[i].DisplayName != "" && strings.HasPrefix(strings.ToLower(views[i].DisplayName), queryLower) {
+			return &views[i]
+		}
+	}
+
+	for i := range views {
+		if views[i].Summary != "" && strings.Contains(strings.ToLower(views[i].Summary), queryLower) {
+			return &views[i]
+		}
+	}
+
+	return nil
+}
+
+func findSessionViewBySelectionID(views []sessionListView, selectionID string) *sessionListView {
+	for i := range views {
+		if views[i].SelectionID == selectionID {
+			return &views[i]
+		}
+	}
+	return nil
+}
+
+func findSessionViewByLegacyID(views []sessionListView, rawID string) *sessionListView {
+	rawID = strings.TrimSpace(rawID)
+	if rawID == "" {
+		return nil
+	}
+	for i := range views {
+		if views[i].InternalID == rawID || views[i].CurrentAgentSessionID == rawID || views[i].DeleteAgentSessionID == rawID {
+			return &views[i]
+		}
+		for _, id := range views[i].MatchAgentSessionIDs {
+			if id == rawID {
+				return &views[i]
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeDeleteModeSelectionIDs(views []sessionListView, ids map[string]struct{}) map[string]struct{} {
+	if len(ids) == 0 {
+		return map[string]struct{}{}
+	}
+	out := make(map[string]struct{}, len(ids))
+	for id := range ids {
+		if view := findSessionViewBySelectionID(views, id); view != nil {
+			out[view.SelectionID] = struct{}{}
+			continue
+		}
+		if view := findSessionViewByLegacyID(views, id); view != nil {
+			out[view.SelectionID] = struct{}{}
+			continue
+		}
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+func displayDeleteModeSelectionID(id string) string {
+	id = strings.TrimSpace(id)
+	switch {
+	case strings.HasPrefix(id, "local:"):
+		return strings.TrimSpace(strings.TrimPrefix(id, "local:"))
+	case strings.HasPrefix(id, "agent:"):
+		return strings.TrimSpace(strings.TrimPrefix(id, "agent:"))
+	default:
+		return id
+	}
+}
+
 // dirCardPageSize is the max directory history rows per card page (Feishu / other card UIs).
 const dirCardPageSize = 20
 
@@ -5675,18 +6047,17 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 	}
 
 	if !supportsCards(p) {
-		agentSessions, err := agent.ListSessions(e.ctx)
+		views, err := e.listSessionViews(msg.SessionKey, agent, sessions)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 			return
 		}
-		agentSessions = e.applySessionFilter(agentSessions, sessions)
-		if len(agentSessions) == 0 {
+		if len(views) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
 		}
 
-		total := len(agentSessions)
+		total := len(views)
 		totalPages := (total + listPageSize - 1) / listPageSize
 
 		page := 1
@@ -5706,8 +6077,6 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 		}
 
 		agentName := agent.Name()
-		activeSession := sessions.GetOrCreateActive(msg.SessionKey)
-		activeAgentID := activeSession.GetAgentSessionID()
 
 		var sb strings.Builder
 		if totalPages > 1 {
@@ -5716,26 +6085,13 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListTitle), agentName, total))
 		}
 		for i := start; i < end; i++ {
-			s := agentSessions[i]
+			s := views[i]
 			marker := "◻"
-			if s.ID == activeAgentID {
+			if s.Active {
 				marker = "▶"
 			}
-			displayName := sessions.GetSessionName(s.ID)
-			if displayName != "" {
-				displayName = "📌 " + displayName
-			} else {
-				displayName = strings.ReplaceAll(s.Summary, "\n", " ")
-				displayName = strings.Join(strings.Fields(displayName), " ")
-				if displayName == "" {
-					displayName = "(empty)"
-				}
-				if len([]rune(displayName)) > 40 {
-					displayName = string([]rune(displayName)[:40]) + "…"
-				}
-			}
 			sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
-				marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
+				marker, i+1, s.DisplayName, s.MessageCount, s.UpdatedAt.Format("01-02 15:04")))
 		}
 		if totalPages > 1 {
 			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListPageHint), page, totalPages))
@@ -5772,14 +6128,13 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
-	agentSessions, err := agent.ListSessions(e.ctx)
+	views, err := e.listSessionViews(msg.SessionKey, agent, sessions)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions)
 
-	matched := e.matchSession(agentSessions, sessions, query)
+	matched := e.matchSessionView(views, query)
 	if matched == nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
 		return
@@ -5789,70 +6144,18 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	e.cleanupInteractiveState(interactiveKey)
 	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
 
-	session := sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
-	session.ClearHistory()
+	if matched.External {
+		sessions.SwitchToAgentSession(msg.SessionKey, matched.DeleteAgentSessionID, agent.Name(), matched.Summary)
+	} else {
+		if _, err := sessions.SwitchSession(msg.SessionKey, matched.InternalID); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+			return
+		}
+	}
 
-	shortID := matched.ID
-	if len(shortID) > 12 {
-		shortID = shortID[:12]
-	}
-	displayName := sessions.GetSessionName(matched.ID)
-	if displayName == "" {
-		displayName = matched.Summary
-	}
+	displayName := matched.DisplayName
 	e.reply(p, msg.ReplyCtx,
-		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount))
-}
-
-// matchSession resolves a user query to an agent session. Priority:
-//  1. Numeric index (1-based, matching /list output)
-//  2. Exact custom name match (case-insensitive)
-//  3. Session ID prefix match
-//  4. Custom name prefix match (case-insensitive)
-//  5. Summary substring match (case-insensitive)
-func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManager, query string) *AgentSessionInfo {
-	if len(sessions) == 0 {
-		return nil
-	}
-
-	// 1. Numeric index
-	if idx, err := strconv.Atoi(query); err == nil && idx >= 1 && idx <= len(sessions) {
-		return &sessions[idx-1]
-	}
-
-	queryLower := strings.ToLower(query)
-
-	// 2. Exact custom name match
-	for i := range sessions {
-		name := manager.GetSessionName(sessions[i].ID)
-		if name != "" && strings.ToLower(name) == queryLower {
-			return &sessions[i]
-		}
-	}
-
-	// 3. Session ID prefix match
-	for i := range sessions {
-		if strings.HasPrefix(sessions[i].ID, query) {
-			return &sessions[i]
-		}
-	}
-
-	// 4. Custom name prefix match
-	for i := range sessions {
-		name := manager.GetSessionName(sessions[i].ID)
-		if name != "" && strings.HasPrefix(strings.ToLower(name), queryLower) {
-			return &sessions[i]
-		}
-	}
-
-	// 5. Summary substring match
-	for i := range sessions {
-		if sessions[i].Summary != "" && strings.Contains(strings.ToLower(sessions[i].Summary), queryLower) {
-			return &sessions[i]
-		}
-	}
-
-	return nil
+		e.i18n.Tf(MsgSwitchSuccess, displayName, matched.shortID(), matched.MessageCount))
 }
 
 func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
@@ -10096,19 +10399,21 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		agent, sessions := e.sessionContextForKey(sessionKey)
-		agentSessions, err := agent.ListSessions(e.ctx)
-		if err != nil || len(agentSessions) == 0 {
+		views, err := e.listSessionViews(sessionKey, agent, sessions)
+		if err != nil || len(views) == 0 {
 			return
 		}
-		agentSessions = e.applySessionFilter(agentSessions, sessions)
-		matched := e.matchSession(agentSessions, sessions, args)
+		matched := e.matchSessionView(views, args)
 		if matched == nil {
 			return
 		}
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
-		session := sessions.SwitchToAgentSession(sessionKey, matched.ID, agent.Name(), matched.Summary)
-		session.ClearHistory()
+		if matched.External {
+			sessions.SwitchToAgentSession(sessionKey, matched.DeleteAgentSessionID, agent.Name(), matched.Summary)
+			return
+		}
+		_, _ = sessions.SwitchSession(sessionKey, matched.InternalID)
 
 	case "/dir":
 		fields := strings.Fields(args)
@@ -10249,32 +10554,31 @@ func (e *Engine) getModelSwitchState(sessionKey string) *modelSwitchState {
 
 func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
 	agent, sessions := e.sessionContextForKey(sessionKey)
-	agentSessions, err := agent.ListSessions(e.ctx)
+	views, err := e.listSessionViews(sessionKey, agent, sessions)
 	if err != nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions)
 	dm := e.getDeleteModeState(sessionKey)
 	if dm == nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgDeleteUsage))
 	}
 	switch dm.phase {
 	case "confirm":
-		return e.renderDeleteModeConfirmCard(sessionKey, sessions, dm, agentSessions)
+		return e.renderDeleteModeConfirmCard(sessionKey, sessions, dm, views)
 	case "result":
 		return e.renderDeleteModeResultCard(dm)
 	case "deleting":
 		return e.renderDeleteModeDeletingCard(dm)
 	default:
-		return e.renderDeleteModeSelectCard(sessionKey, sessions, dm, agentSessions)
+		return e.renderDeleteModeSelectCard(sessionKey, sessions, dm, views)
 	}
 }
 
-func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *SessionManager, dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
-	if len(agentSessions) == 0 {
+func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *SessionManager, dm *deleteModeState, views []sessionListView) *Card {
+	if len(views) == 0 {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgListEmpty))
 	}
-	total := len(agentSessions)
+	total := len(views)
 	totalPages := (total + listPageSize - 1) / listPageSize
 	page := dm.page
 	if page < 1 {
@@ -10290,35 +10594,30 @@ func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *Session
 	}
 
 	cb := NewCard().Title(e.i18n.T(MsgDeleteModeTitle), "carmine")
-	activeAgentID := sessions.GetOrCreateActive(sessionKey).GetAgentSessionID()
-	selectedCount := 0
+	selectedCount := len(dm.selectedIDs)
 	for i := start; i < end; i++ {
-		s := agentSessions[i]
-		isActive := activeAgentID == s.ID
-		isSelected := false
-		if !isActive {
-			_, isSelected = dm.selectedIDs[s.ID]
-		}
+		s := views[i]
+		isActive := s.Active
+		_, isSelected := dm.selectedIDs[s.SelectionID]
 		marker := "◻"
 		if isActive {
 			marker = "▶"
 		} else if isSelected {
 			marker = "☑"
-			selectedCount++
 		}
 		btnText := e.i18n.T(MsgDeleteModeSelect)
 		btnType := "default"
-		action := fmt.Sprintf("act:/delete-mode toggle %s", s.ID)
+		action := fmt.Sprintf("act:/delete-mode toggle %s", s.SelectionID)
 		if isActive {
 			btnText = e.i18n.T(MsgCardTitleCurrentSession)
 			btnType = "primary"
-			action = fmt.Sprintf("act:/delete-mode noop %s", s.ID)
+			action = fmt.Sprintf("act:/delete-mode noop %s", s.SelectionID)
 		} else if isSelected {
 			btnText = e.i18n.T(MsgDeleteModeSelected)
 			btnType = "primary"
 		}
 		cb.ListItemBtn(
-			e.i18n.Tf(MsgListItem, marker, i+1, e.deleteSessionDisplayName(sessions, &s), s.MessageCount, s.ModifiedAt.Format("01-02 15:04")),
+			e.i18n.Tf(MsgListItem, marker, i+1, e.deleteSessionViewDisplayName(s), s.MessageCount, s.UpdatedAt.Format("01-02 15:04")),
 			btnText,
 			btnType,
 			action,
@@ -10346,13 +10645,13 @@ func (e *Engine) renderDeleteModeSelectCard(sessionKey string, sessions *Session
 	return cb.Build()
 }
 
-func (e *Engine) renderDeleteModeConfirmCard(sessionKey string, sessions *SessionManager, dm *deleteModeState, agentSessions []AgentSessionInfo) *Card {
-	selectedNames := e.deleteModeSelectionNames(sessions, dm, agentSessions)
+func (e *Engine) renderDeleteModeConfirmCard(sessionKey string, sessions *SessionManager, dm *deleteModeState, views []sessionListView) *Card {
+	selectedNames := e.deleteModeSelectionNames(dm, views)
 	body := strings.Join(selectedNames, "\n")
 	if body == "" {
 		body = e.i18n.T(MsgDeleteModeEmptySelection)
 	}
-	hasArtifacts := e.selectionHasArtifacts(sessionKey, sessions, dm.selectedIDs)
+	hasArtifacts := e.selectionHasArtifacts(sessionKey, sessions, views, dm.selectedIDs)
 	bodyParts := []string{body}
 	if hasArtifacts {
 		bodyParts = append(bodyParts, e.i18n.T(MsgDeleteModeArtifactHint))
@@ -10522,11 +10821,11 @@ func (e *Engine) pushModelSwitchResultCard(sessionKey string, card *Card) {
 	e.sendWithCard(targetPlatform, rctx, card)
 }
 
-func (e *Engine) deleteModeSelectionNames(sessions *SessionManager, dm *deleteModeState, agentSessions []AgentSessionInfo) []string {
+func (e *Engine) deleteModeSelectionNames(dm *deleteModeState, views []sessionListView) []string {
 	names := make([]string, 0, len(dm.selectedIDs))
-	for i := range agentSessions {
-		if _, ok := dm.selectedIDs[agentSessions[i].ID]; ok {
-			names = append(names, "- "+e.deleteSessionDisplayName(sessions, &agentSessions[i]))
+	for i := range views {
+		if _, ok := dm.selectedIDs[views[i].SelectionID]; ok {
+			names = append(names, "- "+e.deleteSessionViewDisplayName(views[i]))
 		}
 	}
 	return names
@@ -10545,6 +10844,11 @@ func (e *Engine) executeDeleteModeAction(sessionKey, args string) {
 	if len(fields) == 0 {
 		return
 	}
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	views, err := e.listSessionViews(sessionKey, agent, sessions)
+	if err != nil {
+		return
+	}
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -10559,6 +10863,11 @@ func (e *Engine) executeDeleteModeAction(sessionKey, args string) {
 			return
 		}
 		id := fields[1]
+		if view := findSessionViewBySelectionID(views, id); view != nil {
+			id = view.SelectionID
+		} else if view := findSessionViewByLegacyID(views, id); view != nil {
+			id = view.SelectionID
+		}
 		if _, ok := dm.selectedIDs[id]; ok {
 			delete(dm.selectedIDs, id)
 		} else {
@@ -10597,7 +10906,7 @@ func (e *Engine) executeDeleteModeAction(sessionKey, args string) {
 		dm.hint = e.i18n.Tf(MsgDeleteModeDeletingBody, len(ids))
 		go e.performDeleteModeAsync(sessionKey, ids, deleteArtifacts)
 	case "form-submit":
-		dm.selectedIDs = parseDeleteModeSelectedIDs(fields[1:])
+		dm.selectedIDs = normalizeDeleteModeSelectionIDs(views, parseDeleteModeSelectedIDs(fields[1:]))
 		if len(dm.selectedIDs) == 0 {
 			dm.phase = "select"
 			dm.hint = e.i18n.T(MsgDeleteModeEmptySelection)
@@ -10630,19 +10939,18 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, selectedIDs map[st
 	if !ok {
 		return []string{e.i18n.T(MsgDeleteNotSupported)}
 	}
-	agentSessions, err := agent.ListSessions(e.ctx)
+	views, err := e.listSessionViews(sessionKey, agent, sessions)
 	if err != nil {
 		return []string{e.i18n.Tf(MsgError, err)}
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions)
-	seen := make(map[string]struct{}, len(agentSessions))
+	seen := make(map[string]struct{}, len(views))
 	lines := make([]string, 0, len(selectedIDs))
-	for i := range agentSessions {
-		seen[agentSessions[i].ID] = struct{}{}
-		if _, ok := selectedIDs[agentSessions[i].ID]; !ok {
+	for i := range views {
+		seen[views[i].SelectionID] = struct{}{}
+		if _, ok := selectedIDs[views[i].SelectionID]; !ok {
 			continue
 		}
-		if line := e.deleteSingleSessionReply(&Message{SessionKey: sessionKey}, deleter, &agentSessions[i], deleteArtifacts); line != "" {
+		if line := e.deleteSingleSessionReply(&Message{SessionKey: sessionKey}, deleter, &views[i], deleteArtifacts); line != "" {
 			lines = append(lines, line)
 		}
 	}
@@ -10655,7 +10963,7 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, selectedIDs map[st
 	}
 	sort.Strings(missingIDs)
 	for _, id := range missingIDs {
-		lines = append(lines, fmt.Sprintf(e.i18n.T(MsgDeleteModeMissingSession), id))
+		lines = append(lines, fmt.Sprintf(e.i18n.T(MsgDeleteModeMissingSession), displayDeleteModeSelectionID(id)))
 	}
 	if len(lines) == 0 {
 		lines = append(lines, e.i18n.T(MsgDeleteModeEmptySelection))
@@ -10842,16 +11150,15 @@ func (e *Engine) renderModeCard() *Card {
 
 func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	agent, sessions := e.sessionContextForKey(sessionKey)
-	agentSessions, err := agent.ListSessions(e.ctx)
+	views, err := e.listSessionViews(sessionKey, agent, sessions)
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions)
-	if len(agentSessions) == 0 {
+	if len(views) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
 
-	total := len(agentSessions)
+	total := len(views)
 	totalPages := (total + listPageSize - 1) / listPageSize
 	if page > totalPages {
 		page = totalPages
@@ -10864,8 +11171,6 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	}
 
 	agentName := agent.Name()
-	activeSession := sessions.GetOrCreateActive(sessionKey)
-	activeAgentID := activeSession.GetAgentSessionID()
 
 	var titleStr string
 	if totalPages > 1 {
@@ -10876,30 +11181,17 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 
 	cb := NewCard().Title(titleStr, "turquoise")
 	for i := start; i < end; i++ {
-		s := agentSessions[i]
+		s := views[i]
 		marker := "◻"
-		if s.ID == activeAgentID {
+		if s.Active {
 			marker = "▶"
 		}
-		displayName := sessions.GetSessionName(s.ID)
-		if displayName != "" {
-			displayName = "📌 " + displayName
-		} else {
-			displayName = strings.ReplaceAll(s.Summary, "\n", " ")
-			displayName = strings.Join(strings.Fields(displayName), " ")
-			if displayName == "" {
-				displayName = e.i18n.T(MsgListEmptySummary)
-			}
-			if len([]rune(displayName)) > 40 {
-				displayName = string([]rune(displayName)[:40]) + "…"
-			}
-		}
 		btnType := "default"
-		if s.ID == activeAgentID {
+		if s.Active {
 			btnType = "primary"
 		}
 		cb.ListItemBtn(
-			e.i18n.Tf(MsgListItem, marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")),
+			e.i18n.Tf(MsgListItem, marker, i+1, s.DisplayName, s.MessageCount, s.UpdatedAt.Format("01-02 15:04")),
 			fmt.Sprintf("#%d", i+1),
 			btnType,
 			fmt.Sprintf("act:/switch %d", i+1),
@@ -12914,35 +13206,23 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	agentSessions, err := agent.ListSessions(e.ctx)
+	views, err := e.listSessionViews(msg.SessionKey, agent, sessions)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions)
 
 	prefix := strings.TrimSpace(args[0])
 	if isExplicitDeleteBatchArg(prefix) {
-		indices, err := parseDeleteBatchIndices(prefix, len(agentSessions))
+		indices, err := parseDeleteBatchIndices(prefix, len(views))
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteUsage))
 			return
 		}
-		e.cmdDeleteBatch(p, msg, deleter, agentSessions, indices)
+		e.cmdDeleteBatch(p, msg, deleter, views, indices)
 		return
 	}
-	var matched *AgentSessionInfo
-
-	if idx, err := strconv.Atoi(prefix); err == nil && idx >= 1 && idx <= len(agentSessions) {
-		matched = &agentSessions[idx-1]
-	} else {
-		for i := range agentSessions {
-			if strings.HasPrefix(agentSessions[i].ID, prefix) {
-				matched = &agentSessions[i]
-				break
-			}
-		}
-	}
+	matched := e.matchSessionView(views, prefix)
 
 	if matched == nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), prefix))
@@ -13024,15 +13304,15 @@ func parseDeleteBatchIndices(spec string, max int) ([]int, error) {
 	return indices, nil
 }
 
-func (e *Engine) cmdDeleteBatch(p Platform, msg *Message, deleter SessionDeleter, sessions []AgentSessionInfo, indices []int) {
-	if pending, ok := e.buildPendingDeleteRequest(msg, sessions, indices); ok {
+func (e *Engine) cmdDeleteBatch(p Platform, msg *Message, deleter SessionDeleter, views []sessionListView, indices []int) {
+	if pending, ok := e.buildPendingDeleteRequest(msg, views, indices); ok {
 		e.storePendingDelete(msg.SessionKey, p, msg.ReplyCtx, pending)
 		e.reply(p, msg.ReplyCtx, pending.prompt)
 		return
 	}
 	lines := make([]string, 0, len(indices))
 	for _, idx := range indices {
-		matched := &sessions[idx-1]
+		matched := &views[idx-1]
 		if line := e.deleteSingleSessionReply(msg, deleter, matched, false); line != "" {
 			lines = append(lines, line)
 		}
@@ -13044,7 +13324,7 @@ func (e *Engine) cmdDeleteBatch(p Platform, msg *Message, deleter SessionDeleter
 	e.reply(p, msg.ReplyCtx, strings.Join(lines, "\n"))
 }
 
-func (e *Engine) deleteSingleSession(p Platform, msg *Message, deleter SessionDeleter, matched *AgentSessionInfo) {
+func (e *Engine) deleteSingleSession(p Platform, msg *Message, deleter SessionDeleter, matched *sessionListView) {
 	if matched == nil {
 		return
 	}
@@ -13056,7 +13336,7 @@ func (e *Engine) deleteSingleSession(p Platform, msg *Message, deleter SessionDe
 	e.reply(p, msg.ReplyCtx, e.deleteSingleSessionReply(msg, deleter, matched, false))
 }
 
-func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, matched *AgentSessionInfo, deleteArtifacts bool) string {
+func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, matched *sessionListView, deleteArtifacts bool) string {
 	if matched == nil {
 		return ""
 	}
@@ -13064,20 +13344,31 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 	// Prevent deleting the currently active session
 	_, sessions := e.sessionContextForKey(msg.SessionKey)
 	activeSession := sessions.GetOrCreateActive(msg.SessionKey)
-	if activeSession.GetAgentSessionID() == matched.ID {
+	if matched.InternalID != "" && activeSession.ID == matched.InternalID {
+		return e.i18n.T(MsgDeleteActiveDenied)
+	}
+	if matched.InternalID == "" && matched.DeleteAgentSessionID != "" && activeSession.GetAgentSessionID() == matched.DeleteAgentSessionID {
 		return e.i18n.T(MsgDeleteActiveDenied)
 	}
 
-	displayName := e.deleteSessionDisplayName(sessions, matched)
-	artifactInfo := e.findSessionArtifactDir(msg, matched.ID, sessions)
+	displayName := e.deleteSessionViewDisplayName(*matched)
+	artifactInfo := e.findSessionArtifactDirForView(msg, matched, sessions)
 
-	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
-		return e.i18n.Tf(MsgFailedToDeleteSession, displayName, err)
+	if matched.DeleteAgentSessionID != "" {
+		if err := deleter.DeleteSession(e.ctx, matched.DeleteAgentSessionID); err != nil {
+			return e.i18n.Tf(MsgFailedToDeleteSession, displayName, err)
+		}
 	}
 
 	// Keep local session snapshot aligned with agent-side deletion.
-	sessions.DeleteByAgentSessionID(matched.ID)
-	sessions.SetSessionName(matched.ID, "")
+	if matched.InternalID != "" {
+		sessions.DeleteByID(matched.InternalID)
+	} else if matched.DeleteAgentSessionID != "" {
+		sessions.DeleteByAgentSessionID(matched.DeleteAgentSessionID)
+	}
+	for _, id := range matched.MatchAgentSessionIDs {
+		sessions.SetSessionName(id, "")
+	}
 	if deleteArtifacts && artifactInfo.Exists {
 		if err := removeSessionArtifactDir(artifactInfo.Root, artifactInfo.Path); err != nil {
 			return e.i18n.Tf(MsgDeleteSuccessWithArtifactFailed, displayName, filepath.Base(artifactInfo.Path), err)
@@ -13092,6 +13383,38 @@ type sessionArtifactInfo struct {
 	Path string
 	Dir  string
 	Exists bool
+}
+
+func (e *Engine) findSessionArtifactDirForView(msg *Message, matched *sessionListView, sessions *SessionManager) sessionArtifactInfo {
+	if matched == nil {
+		return sessionArtifactInfo{}
+	}
+	var target *Session
+	if matched.LocalSession != nil {
+		target = matched.LocalSession
+	} else if matched.InternalID != "" {
+		target = sessions.FindByID(matched.InternalID)
+	}
+	if target == nil {
+		return e.findSessionArtifactDir(msg, matched.DeleteAgentSessionID, sessions)
+	}
+	dir := strings.TrimSpace(target.GetArchiveDir())
+	if dir == "" {
+		return sessionArtifactInfo{}
+	}
+	agent, _ := e.sessionContextForKey(msg.SessionKey)
+	root := resolveSessionArchiveRoot(e.sessionArchiveDir, e.commandWorkDir(agent, msg), nil, agent)
+	if root == "" {
+		return sessionArtifactInfo{}
+	}
+	path := filepath.Join(root, dir)
+	_, err := os.Stat(path)
+	return sessionArtifactInfo{
+		Root:   root,
+		Path:   path,
+		Dir:    dir,
+		Exists: err == nil,
+	}
 }
 
 func (e *Engine) findSessionArtifactDir(msg *Message, agentSessionID string, sessions *SessionManager) sessionArtifactInfo {
@@ -13137,23 +13460,23 @@ func (e *Engine) findSessionArtifactDir(msg *Message, agentSessionID string, ses
 
 type pendingDeletePlan = pendingDeleteState
 
-func (e *Engine) buildSinglePendingDelete(msg *Message, matched *AgentSessionInfo) *pendingDeletePlan {
+func (e *Engine) buildSinglePendingDelete(msg *Message, matched *sessionListView) *pendingDeletePlan {
 	if matched == nil {
 		return nil
 	}
 	_, sessions := e.sessionContextForKey(msg.SessionKey)
-	info := e.findSessionArtifactDir(msg, matched.ID, sessions)
+	info := e.findSessionArtifactDirForView(msg, matched, sessions)
 	if !info.Exists {
 		return nil
 	}
-	displayName := e.deleteSessionDisplayName(sessions, matched)
+	displayName := e.deleteSessionViewDisplayName(*matched)
 	return &pendingDeletePlan{
-		selectedIDs: map[string]struct{}{matched.ID: {}},
+		selectedIDs: map[string]struct{}{matched.SelectionID: {}},
 		prompt: e.i18n.Tf(MsgDeleteConfirmArtifactsPromptSingle, displayName, filepath.Base(info.Path)),
 	}
 }
 
-func (e *Engine) buildPendingDeleteRequest(msg *Message, agentSessions []AgentSessionInfo, indices []int) (*pendingDeletePlan, bool) {
+func (e *Engine) buildPendingDeleteRequest(msg *Message, views []sessionListView, indices []int) (*pendingDeletePlan, bool) {
 	if len(indices) == 0 {
 		return nil, false
 	}
@@ -13161,12 +13484,12 @@ func (e *Engine) buildPendingDeleteRequest(msg *Message, agentSessions []AgentSe
 	selected := make(map[string]struct{}, len(indices))
 	var dirs []string
 	for _, idx := range indices {
-		if idx < 1 || idx > len(agentSessions) {
+		if idx < 1 || idx > len(views) {
 			continue
 		}
-		sessionInfo := agentSessions[idx-1]
-		selected[sessionInfo.ID] = struct{}{}
-		info := e.findSessionArtifactDir(msg, sessionInfo.ID, sessions)
+		view := views[idx-1]
+		selected[view.SelectionID] = struct{}{}
+		info := e.findSessionArtifactDirForView(msg, &view, sessions)
 		if info.Exists {
 			dirs = append(dirs, filepath.Base(info.Path))
 		}
@@ -13181,13 +13504,16 @@ func (e *Engine) buildPendingDeleteRequest(msg *Message, agentSessions []AgentSe
 	}, true
 }
 
-func (e *Engine) selectionHasArtifacts(sessionKey string, sessions *SessionManager, selectedIDs map[string]struct{}) bool {
+func (e *Engine) selectionHasArtifacts(sessionKey string, sessions *SessionManager, views []sessionListView, selectedIDs map[string]struct{}) bool {
 	if len(selectedIDs) == 0 {
 		return false
 	}
 	msg := &Message{SessionKey: sessionKey}
-	for id := range selectedIDs {
-		if e.findSessionArtifactDir(msg, id, sessions).Exists {
+	for i := range views {
+		if _, ok := selectedIDs[views[i].SelectionID]; !ok {
+			continue
+		}
+		if e.findSessionArtifactDirForView(msg, &views[i], sessions).Exists {
 			return true
 		}
 	}
@@ -13242,6 +13568,17 @@ func (e *Engine) deleteSessionDisplayName(sessions *SessionManager, matched *Age
 			shortID = shortID[:12]
 		}
 		displayName = shortID
+	}
+	return displayName
+}
+
+func (e *Engine) deleteSessionViewDisplayName(view sessionListView) string {
+	displayName := strings.TrimSpace(view.DisplayName)
+	if displayName == "" {
+		displayName = strings.TrimSpace(view.Summary)
+	}
+	if displayName == "" {
+		displayName = view.shortID()
 	}
 	return displayName
 }

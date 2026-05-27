@@ -3496,8 +3496,9 @@ func TestDeleteMode_ToggleSelectionReturnsUpdatedCard(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
 
+	selectedID := externalSessionSelectionID("session-2")
 	e.cmdDelete(p, msg, nil)
-	card := e.handleCardNav("act:/delete-mode toggle session-2", msg.SessionKey)
+	card := e.handleCardNav("act:/delete-mode toggle "+selectedID, msg.SessionKey)
 	if card == nil {
 		t.Fatal("expected card update after toggle")
 	}
@@ -3525,7 +3526,8 @@ func TestDeleteMode_ConfirmCardShowsArtifactDeleteChoice(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
 
-	victim := e.sessions.NewSession("feishu:user2", "victim")
+	_ = e.sessions.GetOrCreateActive(msg.SessionKey)
+	victim := e.sessions.NewSideSession(msg.SessionKey, "victim")
 	victim.SetAgentSessionID("session-2", "stub")
 	victim.SetArchiveDir(victim.ID + "__victim")
 	artifactDir := filepath.Join(workDir, "artifacts", "sessions", victim.GetArchiveDir())
@@ -3534,7 +3536,7 @@ func TestDeleteMode_ConfirmCardShowsArtifactDeleteChoice(t *testing.T) {
 	}
 
 	e.cmdDelete(p, msg, nil)
-	_ = e.handleCardNav("act:/delete-mode toggle session-2", msg.SessionKey)
+	_ = e.handleCardNav("act:/delete-mode toggle "+localSessionSelectionID(victim.ID), msg.SessionKey)
 	confirmCard := e.handleCardNav("act:/delete-mode confirm", msg.SessionKey)
 	if confirmCard == nil {
 		t.Fatal("expected confirmation card")
@@ -3557,9 +3559,14 @@ func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
 
+	_ = e.sessions.GetOrCreateActive(msg.SessionKey)
+	s1 := e.sessions.NewSideSession(msg.SessionKey, "One")
+	s1.SetAgentSessionID("session-1", "stub")
+	s3 := e.sessions.NewSideSession(msg.SessionKey, "Three")
+	s3.SetAgentSessionID("session-3", "stub")
 	e.cmdDelete(p, msg, nil)
-	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
-	_ = e.handleCardNav("act:/delete-mode toggle session-3", msg.SessionKey)
+	_ = e.handleCardNav("act:/delete-mode toggle "+localSessionSelectionID(s1.ID), msg.SessionKey)
+	_ = e.handleCardNav("act:/delete-mode toggle "+localSessionSelectionID(s3.ID), msg.SessionKey)
 
 	confirmCard := e.handleCardNav("act:/delete-mode confirm", msg.SessionKey)
 	if confirmCard == nil {
@@ -3600,14 +3607,16 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
 
+	_ = e.sessions.GetOrCreateActive(msg.SessionKey)
+	s1 := e.sessions.NewSideSession(msg.SessionKey, "One")
+	s1.SetAgentSessionID("session-1", "stub")
+	s3 := e.sessions.NewSideSession(msg.SessionKey, "Three")
+	s3.SetAgentSessionID("session-3", "stub")
 	e.cmdDelete(p, msg, nil)
-	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
-	_ = e.handleCardNav("act:/delete-mode toggle session-3", msg.SessionKey)
+	_ = e.handleCardNav("act:/delete-mode toggle "+localSessionSelectionID(s3.ID), msg.SessionKey)
+	_ = e.handleCardNav("act:/delete-mode toggle "+externalSessionSelectionID("session-1"), msg.SessionKey)
 
-	agent.sessions = []AgentSessionInfo{
-		{ID: "session-1", Summary: "One"},
-		{ID: "session-2", Summary: "Two"},
-	}
+	agent.sessions = []AgentSessionInfo{{ID: "session-2", Summary: "Two"}}
 
 	resultCard := e.handleCardNav("act:/delete-mode submit keep", msg.SessionKey)
 	if resultCard == nil {
@@ -3621,10 +3630,10 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 	}
 	pushedCard := refreshed[len(refreshed)-1]
 	resultText := pushedCard.RenderText()
-	if !strings.Contains(resultText, "Session deleted: One") {
+	if !strings.Contains(resultText, "Session deleted: Three") {
 		t.Fatalf("result text = %q, want deleted session line", resultText)
 	}
-	if !strings.Contains(resultText, "Missing selected session") || !strings.Contains(resultText, "session-3") {
+	if !strings.Contains(resultText, "Missing selected session") || !strings.Contains(resultText, "session-1") {
 		t.Fatalf("result text = %q, want missing selected session to be reported", resultText)
 	}
 }
@@ -3677,8 +3686,11 @@ func TestDeleteMode_PageNavigationPreservesSelection(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
 
+	_ = e.sessions.GetOrCreateActive(msg.SessionKey)
+	selected := e.sessions.NewSideSession(msg.SessionKey, "selected")
+	selected.SetAgentSessionID("session-1", "stub")
 	e.cmdDelete(p, msg, nil)
-	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
+	_ = e.handleCardNav("act:/delete-mode toggle "+localSessionSelectionID(selected.ID), msg.SessionKey)
 	pageTwo := e.handleCardNav("act:/delete-mode page 2", msg.SessionKey)
 	if pageTwo == nil {
 		t.Fatal("expected page 2 card")
@@ -3690,7 +3702,7 @@ func TestDeleteMode_PageNavigationPreservesSelection(t *testing.T) {
 	if pageOne == nil {
 		t.Fatal("expected page 1 card")
 	}
-	btn, ok := findCardAction(pageOne, "act:/delete-mode toggle session-1")
+	btn, ok := findCardAction(pageOne, "act:/delete-mode toggle "+localSessionSelectionID(selected.ID))
 	if !ok {
 		t.Fatal("expected toggle action for session-1")
 	}
@@ -3707,10 +3719,11 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
-	e.sessions.GetOrCreateActive(msg.SessionKey).SetAgentSessionID("session-1", "test")
+	active := e.sessions.GetOrCreateActive(msg.SessionKey)
+	active.SetAgentSessionID("session-1", "test")
 
 	e.cmdDelete(p, msg, nil)
-	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
+	_ = e.handleCardNav("act:/delete-mode toggle "+localSessionSelectionID(active.ID), msg.SessionKey)
 	resultCard := e.handleCardNav("act:/delete-mode submit keep", msg.SessionKey)
 	if resultCard == nil {
 		t.Fatal("expected deleting card")
@@ -3750,10 +3763,10 @@ func TestDeleteMode_ActiveSessionMarkedWithArrowAndNotSelectable(t *testing.T) {
 		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
 	}
 	card := p.repliedCards[0]
-	if _, ok := findCardAction(card, "act:/delete-mode toggle session-1"); ok {
+	if _, ok := findCardAction(card, "act:/delete-mode toggle "+localSessionSelectionID(s1.ID)); ok {
 		t.Fatal("active session should not be toggle-selectable")
 	}
-	if _, ok := findCardAction(card, "act:/delete-mode noop session-1"); !ok {
+	if _, ok := findCardAction(card, "act:/delete-mode noop "+localSessionSelectionID(s1.ID)); !ok {
 		t.Fatal("expected noop action for active session")
 	}
 	if got := countCardActionValues(card, "act:/delete-mode toggle "); got != 1 {
@@ -3773,9 +3786,14 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+	_ = e.sessions.GetOrCreateActive(msg.SessionKey)
+	s1 := e.sessions.NewSideSession(msg.SessionKey, "One")
+	s1.SetAgentSessionID("session-1", "stub")
+	s3 := e.sessions.NewSideSession(msg.SessionKey, "Three")
+	s3.SetAgentSessionID("session-3", "stub")
 
 	e.cmdDelete(p, msg, nil)
-	confirmCard := e.handleCardNav("act:/delete-mode form-submit session-1,session-3", msg.SessionKey)
+	confirmCard := e.handleCardNav("act:/delete-mode form-submit "+localSessionSelectionID(s1.ID)+","+localSessionSelectionID(s3.ID), msg.SessionKey)
 	if confirmCard == nil {
 		t.Fatal("expected confirm card after form-submit")
 	}
@@ -12978,16 +12996,14 @@ func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
 			step4Count, p.sent[0])
 	}
 
-	// ── Step 5: verify session name on page 2 ─────────────────
-	// The newest session is at the end of the list; check page 2.
+	// ── Step 5: verify session name appears in /list ───────────
 	p.sent = nil
-	e.cmdList(p, msg, []string{"2"})
+	e.cmdList(p, msg, nil)
 	if len(p.sent) != 1 {
-		t.Fatalf("step5: expected 1 reply for page 2, got %d", len(p.sent))
+		t.Fatalf("step5: expected 1 reply for page 1, got %d", len(p.sent))
 	}
-	// The new session should show "我的新会话" (the name from /new), not the message content
 	if !strings.Contains(p.sent[0], "我的新会话") {
-		t.Errorf("step5: /list page 2 should display session name '我的新会话' but it's missing:\n%s", p.sent[0])
+		t.Errorf("step5: /list page 1 should display session name '我的新会话' but it's missing:\n%s", p.sent[0])
 	}
 }
 
