@@ -3376,6 +3376,58 @@ func TestCmdDelete_SyncsLocalSessionSnapshot(t *testing.T) {
 	}
 }
 
+func TestCmdDelete_LocalTrackedSessionStillDeletesWhenAgentSessionFileMissing(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{
+		stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+			{ID: "session-1", Summary: "One"},
+			{ID: "session-2", Summary: "Two"},
+		}},
+		errByID: map[string]error{
+			"session-1": fmt.Errorf("session file not found: session-1"),
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	victim := e.sessions.NewSideSession(msg.SessionKey, "victim")
+	victim.SetAgentSessionID("session-1", "stub")
+	keep := e.sessions.NewSideSession(msg.SessionKey, "keep")
+	keep.SetAgentSessionID("session-2", "stub")
+
+	e.cmdDelete(p, msg, []string{"1"})
+
+	if got := e.sessions.FindByID(victim.ID); got != nil {
+		t.Fatalf("victim session should be removed even when agent session file is missing, got %+v", got)
+	}
+	if got := e.sessions.FindByID(keep.ID); got == nil {
+		t.Fatal("keep session should remain")
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Session deleted: One") {
+		t.Fatalf("reply = %v, want local delete success", p.sent)
+	}
+}
+
+func TestCmdDelete_ExternalSessionStillFailsWhenAgentSessionFileMissing(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{
+		stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+			{ID: "session-1", Summary: "One"},
+		}},
+		errByID: map[string]error{
+			"session-1": fmt.Errorf("session file not found: session-1"),
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdDelete(p, msg, []string{"1"})
+
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "session file not found: session-1") {
+		t.Fatalf("reply = %v, want original delete failure", p.sent)
+	}
+}
+
 func TestCmdDelete_WithArtifactsPromptsBeforeDeleting(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubDeleteWorkDirAgent{stubDeleteAgent: stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{

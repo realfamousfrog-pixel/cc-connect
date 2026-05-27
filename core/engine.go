@@ -6036,6 +6036,14 @@ func displayDeleteModeSelectionID(id string) string {
 	}
 }
 
+func isMissingAgentSessionDeleteErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.TrimSpace(strings.ToLower(err.Error()))
+	return strings.Contains(msg, "session file not found")
+}
+
 // dirCardPageSize is the max directory history rows per card page (Feishu / other card UIs).
 const dirCardPageSize = 20
 
@@ -13356,7 +13364,9 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 
 	if matched.DeleteAgentSessionID != "" {
 		if err := deleter.DeleteSession(e.ctx, matched.DeleteAgentSessionID); err != nil {
-			return e.i18n.Tf(MsgFailedToDeleteSession, displayName, err)
+			if !(matched.InternalID != "" && isMissingAgentSessionDeleteErr(err)) {
+				return e.i18n.Tf(MsgFailedToDeleteSession, displayName, err)
+			}
 		}
 	}
 
